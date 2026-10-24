@@ -30,6 +30,35 @@ export const fileList = useDefineApi<
   method: "GET"
 });
 
+export const realFileList = useDefineApi<
+  {
+    params: {
+      daemonId: string;
+      uuid: string;
+      target: string;
+      page: number;
+      page_size: number;
+      file_name: string;
+    };
+  },
+  {
+    items: {
+      name: string;
+      size: number;
+      time: string;
+      type: number;
+      mode: number;
+    }[];
+    page: number;
+    pageSize: number;
+    total: number;
+    absolutePath: string;
+  }
+>({
+  url: "/api/files/real_list",
+  method: "GET"
+});
+
 export const getFileStatus = useDefineApi<
   {
     params: {
@@ -201,6 +230,7 @@ export const uploadAddress = useDefineApi<
       daemonId: string;
       uuid: string;
       file_name?: string;
+      real_path?: boolean;
     };
   },
   {

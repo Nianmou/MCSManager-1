@@ -1,4 +1,5 @@
 import { t } from "i18next";
+import fs from "fs-extra";
 import os from "os";
 import path from "path";
 import { globalConfiguration, globalEnv } from "../entity/config";
@@ -27,7 +28,7 @@ routerApp.use((event, ctx, data, next) => {
 
     if (
       [Instance.STATUS_BUSY, Instance.STATUS_STARTING].includes(instance.status()) &&
-      !["file/list", "file/status"].includes(event)
+      !["file/list", "file/real_list", "file/status"].includes(event)
     ) {
       return protocol.error(ctx, event, {
         instanceUuid: instanceUuid,
@@ -38,6 +39,22 @@ routerApp.use((event, ctx, data, next) => {
   next();
 });
 
+const REAL_FILE_ROOT = path.normalize("/mnt/steam/cs2");
+
+function assertRealFilePath(target: string) {
+  const normalizedTarget = path.normalize(target);
+  if (!path.isAbsolute(normalizedTarget)) {
+    throw new Error("Access denied: Real path must be absolute");
+  }
+  const relative = path.relative(REAL_FILE_ROOT, normalizedTarget);
+  const isOutside =
+    relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative);
+  if (isOutside) {
+    throw new Error(`Access denied: Real path is limited to ${REAL_FILE_ROOT}`);
+  }
+  return normalizedTarget;
+}
+
 // List the files in the specified instance working directory
 routerApp.on("file/list", async (ctx, data) => {
   try {
@@ -46,6 +63,58 @@ routerApp.on("file/list", async (ctx, data) => {
     fileManager.cd(target);
     const overview = await fileManager.list(page, pageSize, fileName);
     protocol.response(ctx, overview);
+  } catch (error: any) {
+    protocol.responseError(ctx, error);
+  }
+});
+
+// List a real server directory, limited to the CS2 server tree.
+routerApp.on("file/real_list", async (ctx, data) => {
+  try {
+    const { page, pageSize, target, fileName } = data;
+    if (pageSize > 100 || pageSize <= 0 || page < 0) throw new Error("Beyond the value limit");
+
+    const targetPath = assertRealFilePath(String(target));
+    const stat = await fs.stat(targetPath);
+    if (!stat.isDirectory()) throw new Error("Target path is not a directory");
+
+    const dirents = await fs.readdir(targetPath, { withFileTypes: true });
+    const searchFileName = String(fileName || "").toLowerCase();
+    const filteredItems = dirents
+      .filter((dirent) => !searchFileName || dirent.name.toLowerCase().includes(searchFileName))
+      .map((dirent) => ({
+        name: dirent.name,
+        type: dirent.isFile() ? 1 : 0
+      }))
+      .sort((a, b) => {
+        if (a.type !== b.type) return a.type - b.type;
+        return a.name.localeCompare(b.name);
+      });
+
+    const total = filteredItems.length;
+    const sliceStart = page * pageSize;
+    const targetItems = filteredItems.slice(sliceStart, sliceStart + pageSize);
+    const items = await Promise.all(
+      targetItems.map(async (item) => {
+        const itemPath = path.join(targetPath, item.name);
+        const info = await fs.stat(itemPath);
+        return {
+          name: item.name,
+          size: info.size,
+          time: info.mtime.toString(),
+          type: item.type,
+          mode: info.mode
+        };
+      })
+    );
+
+    protocol.response(ctx, {
+      items,
+      page,
+      pageSize,
+      total,
+      absolutePath: targetPath
+    });
   } catch (error: any) {
     protocol.responseError(ctx, error);
   }

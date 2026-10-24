@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import { $t } from "../../i18n";
 import disk_limit_service from "../../service/disk_limit_service";
+import { ensureSwiftlyS2GameInfo } from "../../tools/gameinfo";
 import Instance from "../instance/instance";
 import InstanceCommand from "./base/command";
 
@@ -77,6 +78,17 @@ export default abstract class AbsStartCommand extends InstanceCommand {
             })
           );
         }
+      }
+
+      // CS2/Source2 instances: make sure SwiftlyS2 is still registered in gameinfo.gi.
+      // Non-fatal: a failure to read/patch must never brick instance startup.
+      try {
+        await ensureSwiftlyS2GameInfo(instance);
+      } catch (error: any) {
+        instance.println(
+          "WARN",
+          `[SwiftlyS2] gameinfo.gi 检查/补写失败，仍继续启动: ${error?.message ?? String(error)}`
+        );
       }
 
       return await this.createProcess(instance);

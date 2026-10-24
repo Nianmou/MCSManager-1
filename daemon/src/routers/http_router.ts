@@ -13,6 +13,21 @@ import { clearUploadFiles } from "../tools/filepath";
 import { sendFile } from "../utils/speed_limit";
 
 const router = new Router();
+const REAL_FILE_ROOT = path.normalize("/mnt/steam/cs2");
+
+function assertRealFilePath(target: string) {
+  const normalizedTarget = path.normalize(target);
+  if (!path.isAbsolute(normalizedTarget)) {
+    throw new Error("Access denied: Real path must be absolute");
+  }
+  const relative = path.relative(REAL_FILE_ROOT, normalizedTarget);
+  const isOutside =
+    relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative);
+  if (isOutside) {
+    throw new Error(`Access denied: Real path is limited to ${REAL_FILE_ROOT}`);
+  }
+  return normalizedTarget;
+}
 
 // Define the HTTP home page display route
 router.all("/", async (ctx) => {
@@ -157,7 +172,8 @@ router.post("/upload-new/:key", async (ctx) => {
     const instance = InstanceSubsystem.getInstance(mission.parameter.instanceUuid);
     if (!instance) throw new Error("Access denied: No instance found");
     const uploadDir = mission.parameter.uploadDir;
-    const cwd = instance.absoluteCwdPath();
+    const realPath = mission.parameter.realPath === true;
+    const cwd = realPath ? path.parse(assertRealFilePath(uploadDir)).root : instance.absoluteCwdPath();
     const overwrite = ctx.query.overwrite !== "false";
     const filePath = await FileWriter.getPath(cwd, uploadDir, filename, overwrite);
     let fr = uploadManager.getByPath(filePath);
@@ -174,7 +190,8 @@ router.post("/upload-new/:key", async (ctx) => {
         unzip,
         zipCode,
         filePath,
-        deleteAfterUnzip
+        deleteAfterUnzip,
+        cwd
       );
       await fileWriter.init();
       const id = uploadManager.add(fileWriter);

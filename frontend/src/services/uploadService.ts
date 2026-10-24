@@ -8,6 +8,7 @@ import { message } from "ant-design-vue";
 import { ref, type Ref } from "vue";
 
 const PIECE_SIZE = 1024 * 1024 * 2;
+let uploadTempIdCounter = 0;
 
 type UploadOptions = {
   overwrite: boolean;
@@ -285,7 +286,8 @@ class UploadService {
     // eslint-disable-next-line no-unused-vars
     beforeMounted?: (uploadFile: UploadFiles) => void
   ) {
-    const tempId = Date.now().toString();
+    uploadTempIdCounter = (uploadTempIdCounter + 1) % Number.MAX_SAFE_INTEGER;
+    const tempId = `pending-${Date.now()}-${uploadTempIdCounter}`;
     const uploadFile = new UploadFiles(tempId, file, url, password, options);
     if (beforeMounted) {
       beforeMounted(uploadFile);

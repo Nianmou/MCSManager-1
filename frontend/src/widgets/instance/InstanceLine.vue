@@ -29,9 +29,10 @@ const props = defineProps<{
   record: Record<string, any>;
   targetInstanceInfo: InstanceDetail;
   targetDaemonId: string;
+  multipleMode?: boolean;
 }>();
 
-const emits = defineEmits(["refreshList"]);
+const emits = defineEmits(["refreshList", "select-instance"]);
 const node = props.record?.node;
 
 const instanceId = props.targetInstanceInfo?.instanceUuid;
@@ -100,6 +101,14 @@ const toInstanceTerminal = async () => {
     }
   });
 };
+
+const handleNameClick = () => {
+  if (props.multipleMode) {
+    emits("select-instance", props.targetInstanceInfo, daemonId);
+    return;
+  }
+  toInstanceTerminal();
+};
 </script>
 
 <template>
@@ -107,7 +116,7 @@ const toInstanceTerminal = async () => {
     <template v-if="column.key === 'name'">
       <DatabaseOutlined v-if="node && node?.available" style="margin-right: 8px" />
       <FrownOutlined v-else-if="node" style="margin-right: 8px" />
-      <a v-if="!node" @click="toInstanceTerminal()">
+      <a v-if="!node" @click.prevent="handleNameClick()">
         <a-typography-text
           :style="{ fontWeight: 'normal', maxWidth: '200px' }"
           :ellipsis="{ tooltip: record.name }"

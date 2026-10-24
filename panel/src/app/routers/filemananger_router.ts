@@ -8,7 +8,7 @@ import { operationLogger } from "../service/operation_logger";
 import { getUserPermission, getUserUuid } from "../service/passport_service";
 import { timeUuid } from "../service/password";
 import { isHaveInstanceByUuid, isTopPermissionByUuid } from "../service/permission_service";
-import RemoteRequest from "../service/remote_command";
+import RemoteRequest, { RemoteRequestTimeoutError } from "../service/remote_command";
 import RemoteServiceSubsystem from "../service/remote_service";
 import { systemConfig } from "../setting";
 
@@ -79,6 +79,44 @@ router.get(
       });
       ctx.body = result;
     } catch (err) {
+      ctx.body = err;
+    }
+  }
+);
+
+router.get(
+  "/real_list",
+  speedLimit(0.1),
+  permission({ level: ROLE.USER, speedLimit: false }),
+  validator({
+    query: { daemonId: String, uuid: String, target: String, page: Number, page_size: Number }
+  }),
+  async (ctx) => {
+    try {
+      const target = String(ctx.query.target);
+      const daemonId = String(ctx.query.daemonId);
+      const instanceUuid = String(ctx.query.uuid);
+      const page = Math.max(0, Number(ctx.query.page) || 0);
+      const pageSize = Math.min(100, Math.max(1, Number(ctx.query.page_size) || 10));
+      const fileName = String(ctx.query.file_name || "");
+      const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
+      const result = await new RemoteRequest(remoteService).request(
+        "file/real_list",
+        {
+          instanceUuid,
+          target,
+          pageSize,
+          page,
+          fileName
+        },
+        15000
+      );
+      ctx.body = result;
+    } catch (err) {
+      if (err instanceof RemoteRequestTimeoutError) {
+        ctx.body = new Error("目标节点未更新到支持真实目录上传的版本，或节点网络不稳定");
+        return;
+      }
       ctx.body = err;
     }
   }
@@ -453,6 +491,7 @@ router.all(
       const daemonId = String(ctx.query.daemonId);
       const instanceUuid = String(ctx.query.uuid);
       const uploadDir = String(ctx.query.upload_dir);
+      const realPath = ["1", "true", "yes", "on"].includes(String(ctx.query.real_path || "").toLowerCase());
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
       if (!remoteService) throw new Error($t("TXT_CODE_dd559000") + ` Daemon ID: ${daemonId}`);
       const addr = remoteService.config.fullAddr;
@@ -463,7 +502,8 @@ router.all(
         password: password,
         parameter: {
           uploadDir,
-          instanceUuid
+          instanceUuid,
+          realPath
         }
       });
       operationLogger.log("instance_file_upload", {
@@ -478,6 +518,10 @@ router.all(
         remoteMappings
       };
     } catch (err) {
+      if (err instanceof RemoteRequestTimeoutError) {
+        ctx.body = new Error("目标节点未更新到支持真实目录上传的版本，或节点网络不稳定");
+        return;
+      }
       ctx.body = err;
     }
   }

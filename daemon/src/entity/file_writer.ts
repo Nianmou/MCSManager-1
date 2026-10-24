@@ -25,13 +25,14 @@ export default class FileWriter {
     private unzip: boolean,
     private zipCode: string,
     filePath: string,
-    private deleteAfterUnzip: boolean = false
+    private deleteAfterUnzip: boolean = false,
+    cwd?: string
   ) {
     if (!FileManager.checkFileName(path.basename(this.filename)))
       throw new Error("Access denied: Malformed file name");
 
     this.path = filePath;
-    this.cwd = instance.absoluteCwdPath();
+    this.cwd = cwd || instance.absoluteCwdPath();
   }
 
   static async getPath(cwd: string, dir: string, filename: string, overwrite: boolean) {

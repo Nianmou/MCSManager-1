@@ -6,9 +6,32 @@ import { uploadFileCheckMiddleware, uploadSpeedLimitMiddleware } from "../middle
 import koaRouter from "../routers/http_router";
 import logger from "./log";
 
+function setCorsHeaders(ctx: Koa.Context) {
+  // Because all HTTP requests can only be used by creating a task passport on the panel side, cross-domain requests are allowed, and security can also be guaranteed
+  ctx.response.set("Access-Control-Allow-Origin", "*");
+  ctx.response.set("Access-Control-Allow-Methods", "POST, GET, PUT, DELETE, OPTIONS");
+  ctx.response.set(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Cookie, Accept-Encoding, User-Agent, Host, Referer, " +
+      "X-Requested-With, Accept, Accept-Language, Cache-Control, Connection"
+  );
+  ctx.response.set("X-Power-by", "MCSManager");
+}
+
 export function initKoa() {
   const koaApp = new Koa();
   const config = globalConfiguration.config;
+
+  koaApp.use(async (ctx, next) => {
+    setCorsHeaders(ctx);
+    if (ctx.method === "OPTIONS") {
+      ctx.status = 204;
+      return;
+    }
+    await next();
+    setCorsHeaders(ctx);
+  });
+
   koaApp.use(uploadSpeedLimitMiddleware);
   koaApp.use(uploadFileCheckMiddleware);
   koaApp.use(
@@ -24,19 +47,6 @@ export function initKoa() {
       }
     })
   );
-  // Load Koa top-level middleware
-  koaApp.use(async (ctx, next) => {
-    await next();
-    // Because all HTTP requests can only be used by creating a task passport on the panel side, cross-domain requests are allowed, and security can also be guaranteed
-    ctx.response.set("Access-Control-Allow-Origin", "*");
-    ctx.response.set("Access-Control-Allow-Methods", "POST, GET, PUT, DELETE, OPTIONS");
-    ctx.response.set(
-      "Access-Control-Allow-Headers",
-      "Content-Type, Cookie, Accept-Encoding, User-Agent, Host, Referer, " +
-        "X-Requested-With, Accept, Accept-Language, Cache-Control, Connection"
-    );
-    ctx.response.set("X-Power-by", "MCSManager");
-  });
 
   if (config.prefix != "") {
     const prefix = config.prefix;
