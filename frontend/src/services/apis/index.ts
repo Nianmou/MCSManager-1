@@ -1,5 +1,5 @@
 import { useDefineApi } from "@/stores/useDefineApi";
-import type { InstanceDetail, NodeStatus, PanelStatus, Settings } from "@/types";
+import type { InstanceDetail, NodeStatus, PanelStatus, Schedule, Settings } from "@/types";
 import type { BaseUserInfo, EditUserInfo, LoginUserInfo, UserInstance } from "@/types/user";
 
 export const panelInstall = useDefineApi<
@@ -117,6 +117,14 @@ export const remoteInstancesGlobal = useDefineApi<
   Record<string, { instances: InstanceDetail[]; maxPage: number; page: number; error?: string }>
 >({
   url: "/api/service/remote_services_instances_global"
+});
+
+// Cross-node scheduled-task (plan) overview: per daemon node -> { available, tasks, error? }
+export const scheduleGlobal = useDefineApi<
+  any,
+  Record<string, { available: boolean; tasks: Schedule[]; error?: boolean }>
+>({
+  url: "/api/service/remote_services_schedule_global"
 });
 
 export const settingInfo = useDefineApi<any, Settings>({

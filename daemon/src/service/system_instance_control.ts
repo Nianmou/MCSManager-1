@@ -195,6 +195,17 @@ class InstanceControlSubsystem {
     return res;
   }
 
+  // List every scheduled task on this node across all instances.
+  // Each TaskConfig already carries its own instanceUuid, so a flat list is enough
+  // for the panel to aggregate a cross-node "plan overview".
+  public listAllScheduleJob() {
+    const res: IScheduleTask[] = [];
+    this.taskMap.forEach((arr) => {
+      arr.forEach((v) => res.push(v.config));
+    });
+    return res;
+  }
+
   public async action(task: IScheduleTask) {
     try {
       const actions = task.actions;

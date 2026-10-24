@@ -9,6 +9,7 @@ import {
   DatabaseOutlined,
   DeleteOutlined,
   DownOutlined,
+  FieldTimeOutlined,
   FormOutlined,
   FrownOutlined,
   InfoCircleOutlined,
@@ -52,6 +53,7 @@ import { computeNodeName } from "../tools/nodes";
 import type { InstanceDetail, NodeStatus } from "../types/index";
 import InstanceLine from "./instance/InstanceLine.vue";
 import Shortcut from "./instance/Shortcut.vue";
+import ScheduleManager from "./instance/dialogs/ScheduleManager.vue";
 
 defineProps<{
   card: LayoutCard;
@@ -67,6 +69,8 @@ const operationForm = ref({
 
 const currentRemoteNode = ref<NodeStatus>();
 const isGlobalDaemonMode = computed(() => currentRemoteNode.value?.uuid === ALL_DAEMON_MODE);
+
+const scheduleManagerDialog = ref<InstanceType<typeof ScheduleManager>>();
 
 const { execute: getNodes, state: nodes, isLoading: loadingNodes } = remoteNodeList();
 const { execute: getInstances, state: instances, isLoading: loadingInstance } = remoteInstances();
@@ -1417,6 +1421,10 @@ onMounted(async () => {
                 <DownOutlined />
               </a-button>
             </a-dropdown>
+            <a-button @click="scheduleManagerDialog?.openDialog()">
+              <FieldTimeOutlined />
+              计划管理
+            </a-button>
             <a-button
               type="primary"
               :disabled="!currentRemoteNode?.available"
@@ -1820,6 +1828,8 @@ onMounted(async () => {
         </a-typography-text>
       </a-form>
     </a-modal>
+
+    <ScheduleManager ref="scheduleManagerDialog" />
   </div>
 </template>
 

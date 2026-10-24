@@ -17,6 +17,11 @@ routerApp.on("schedule/list", (ctx, data) => {
   protocol.response(ctx, InstanceControlSubsystem.listScheduleJob(data.instanceUuid));
 });
 
+// get every scheduled task on this node (all instances), for the global plan overview
+routerApp.on("schedule/list_all", (ctx) => {
+  protocol.response(ctx, InstanceControlSubsystem.listAllScheduleJob());
+});
+
 // delete the task plan
 routerApp.on("schedule/delete", (ctx, data) => {
   InstanceControlSubsystem.deleteScheduleTask(data.instanceUuid, data.name);

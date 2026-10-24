@@ -106,6 +106,35 @@ router.get(
 );
 
 // [Top-level Permission]
+// Query scheduled tasks (plan overview) from all daemons at once.
+// Returns per-node: { available, tasks: IScheduleTask[], error? } so the frontend can
+// show which machines are unreachable and which instances have a restart plan.
+router.get("/remote_services_schedule_global", permission({ level: ROLE.ADMIN }), async (ctx) => {
+  const result: Record<string, any> = {};
+
+  const promises = Array.from(RemoteServiceSubsystem.services.values()).map(
+    async (remoteService) => {
+      try {
+        const tasks = await new RemoteRequest(remoteService).request("schedule/list_all", {});
+        result[remoteService.uuid] = {
+          available: remoteService.available,
+          tasks: Array.isArray(tasks) ? tasks : []
+        };
+      } catch (err: any) {
+        result[remoteService.uuid] = {
+          available: remoteService.available,
+          tasks: [],
+          error: true
+        };
+      }
+    }
+  );
+
+  await Promise.all(promises);
+  ctx.body = result;
+});
+
+// [Top-level Permission]
 // Get remote server system information
 router.get("/remote_services_system", permission({ level: ROLE.ADMIN }), async (ctx) => {
   const result = new Array();
