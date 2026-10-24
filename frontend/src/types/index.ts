@@ -20,6 +20,14 @@ export enum NEW_CARD_TYPE {
   OTHER = "OTHER"
 }
 
+// Data-plane mode values. Mirrors `DataPlaneMode` in
+// `panel/src/app/entity/setting.ts`; the contract between the two is the
+// string wire format (`"direct"` / `"proxy"`), not a shared TS symbol.
+export enum DataPlaneMode {
+  Direct = "direct",
+  Proxy = "proxy"
+}
+
 export interface InstanceRuntimeInfo {
   mcPingOnline: boolean;
   currentPlayers: number;
@@ -75,6 +83,7 @@ export interface Settings {
   reverseProxyHeader: string;
   dataPort: number;
   forwardType: number;
+  dataPlane: DataPlaneMode;
   crossDomain: boolean;
   gzip: boolean;
   maxCompress: number;
@@ -91,6 +100,7 @@ export interface Settings {
   businessMode: boolean;
   businessId: string;
   allowChangeCmd: boolean;
+  enableApiKey: boolean | "ONLY_ADMIN";
   registerCode: string;
   panelId: string;
   ssoEnabled: boolean;
@@ -101,7 +111,19 @@ export interface Settings {
   ssoIssuer: string;
   ssoClientId: string;
   ssoClientSecret: string;
+  ssoTokenAuthMethod: string;
   ssoCallbackUrl: string;
+  operationLogEnabled: boolean;
+  operationLogMaxLinesPerFile: number;
+  operationLogKeepDays: number;
+  operationLogMaxTotalLines: number;
+  operationLogRecordLogin: boolean;
+  operationLogRecordInstance: boolean;
+  operationLogRecordFile: boolean;
+  operationLogRecordUser: boolean;
+  operationLogRecordSystem: boolean;
+  // Auto update (panel self-update)
+  updateSourceUrl: string;
 }
 
 export interface ImageInfo {
@@ -252,15 +274,14 @@ export interface ScheduleTaskForm extends NewScheduleTask {
 export interface PanelStatus {
   isInstall: boolean;
   language: string;
-  versionChange?: boolean;
   settings: {
-    canFileManager: boolean;
-    allowUsePreset: boolean;
     businessMode: boolean;
     businessId: string;
-    allowChangeCmd: boolean;
-    panelId: string;
-    ssoEnabled: boolean;
-    ssoOnlyMode: boolean;
+    // Only returned for logged-in users
+    canFileManager?: boolean;
+    allowUsePreset?: boolean;
+    allowChangeCmd?: boolean;
+    panelId?: string;
+    ssoEnabled?: boolean;
   };
 }

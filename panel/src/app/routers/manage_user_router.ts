@@ -1,13 +1,12 @@
-import Koa from "koa";
 import Router from "@koa/router";
+import Koa from "koa";
+import { ROLE } from "../entity/user";
+import { $t } from "../i18n";
 import permission from "../middleware/permission";
 import validator from "../middleware/validator";
+import { getOperationLoggerOperator, operationLogger } from "../service/operation_logger";
 import { register } from "../service/passport_service";
 import userSystem from "../service/user_service";
-import { $t } from "../i18n";
-import { ROLE } from "../entity/user";
-import { operationLogger } from "../service/operation_logger";
-import { error } from "console";
 
 const router = new Router({ prefix: "/auth" });
 
@@ -25,8 +24,7 @@ router.post(
     if (userSystem.existUserName(userName))
       throw new Error($t("TXT_CODE_router.user.existsUserName"));
     operationLogger.log("user_create", {
-      operator_ip: ctx.ip,
-      operator_name: ctx.session?.["userName"],
+      ...getOperationLoggerOperator(ctx),
       target_user_name: userName
     });
     ctx.body = await register(ctx, userName, passWord, permission);
@@ -42,8 +40,7 @@ router.del("/", permission({ level: ROLE.ADMIN }), async (ctx: Koa.Parameterized
       operationLogger.log(
         "user_delete",
         {
-          operator_ip: ctx.ip,
-          operator_name: ctx.session?.["userName"],
+          ...getOperationLoggerOperator(ctx),
           target_user_name: user?.userName || "Unknown"
         },
         "warning"
@@ -77,6 +74,14 @@ router.get(
     resultPage.data.forEach((v) => {
       v.passWord = "";
       v.salt = "";
+      // TOTP seed & SSO subject are server-side secrets: never expose them to
+      // the admin browser (the UserList edit form round-trips whole rows).
+      // Set fields are MASKED (not cleared) so the round-trip can never write
+      // an empty scrubbed value back over the real secret - edit() ignores the
+      // mask literal.
+      v.secret = v.secret ? "__MCSM_SECRET_DATA__" : "";
+      v.ssoSub = v.ssoSub ? "__MCSM_SECRET_DATA__" : "";
+      v.apiKey = v.apiKey ? "__MCSM_SECRET_DATA__" : "";
     });
     ctx.body = resultPage;
   }

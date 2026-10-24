@@ -9,9 +9,10 @@ import downloadManager from "../service/download_manager";
 import { getFileManager, getWindowsDisks } from "../service/file_router_service";
 import logger from "../service/log";
 import * as protocol from "../service/protocol";
-import { routerApp } from "../service/router";
+import { routerApp } from "../service/router_app";
 import InstanceSubsystem from "../service/system_instance";
 import uploadManager from "../service/upload_manager";
+import { resolveInstanceFileOwnership } from "../tools/file_ownership";
 import { checkSafeUrl } from "../utils/url";
 
 // Some routers operate router authentication middleware
@@ -219,11 +220,11 @@ routerApp.on("file/status", async (ctx, data) => {
 });
 
 // Create a new file
-routerApp.on("file/touch", (ctx, data) => {
+routerApp.on("file/touch", async (ctx, data) => {
   try {
     const target = data.target;
     const fileManager = getFileManager(data.instanceUuid);
-    fileManager.newFile(target);
+    await fileManager.newFile(target);
     protocol.response(ctx, true);
   } catch (error: any) {
     protocol.responseError(ctx, error);
@@ -231,11 +232,11 @@ routerApp.on("file/touch", (ctx, data) => {
 });
 
 // Create a directory
-routerApp.on("file/mkdir", (ctx, data) => {
+routerApp.on("file/mkdir", async (ctx, data) => {
   try {
     const target = data.target;
     const fileManager = getFileManager(data.instanceUuid);
-    fileManager.mkdir(target);
+    await fileManager.mkdir(target);
     protocol.response(ctx, true);
   } catch (error: any) {
     protocol.responseError(ctx, error);
@@ -248,7 +249,7 @@ routerApp.on("file/download_from_url", async (ctx, data) => {
     const url = data.url;
     const fileName = data.fileName;
 
-    if (!checkSafeUrl(url)) {
+    if (!(await checkSafeUrl(url))) {
       protocol.responseError(ctx, t("TXT_CODE_3fe1b194"), {
         disablePrint: true
       });
@@ -312,6 +313,9 @@ routerApp.on("file/copy", async (ctx, data) => {
     const targets = data.targets;
     const fileManager = getFileManager(data.instanceUuid);
     for (const target of targets) {
+      // Intentionally NOT awaited: copying very large files can take far longer
+      // than the client request timeout, so the copy runs detached in the
+      // background and the response returns immediately.
       fileManager.copy(target[0], target[1]);
     }
     protocol.response(ctx, true);
@@ -345,13 +349,11 @@ routerApp.on("file/delete", async (ctx, data) => {
       const uploadTask = uploadManager.getByPath(path);
       const downloadTask = downloadManager.tasks.find((t) => t.path === path);
       if (uploadTask != undefined) {
-        uploadManager.delete(uploadTask.id);
-        uploadTask.writer.stop();
+        await uploadTask.writer.stop();
       } else if (downloadTask != undefined) {
         downloadManager.stop(path);
       } else {
-        // async delete
-        fileManager.delete(target);
+        await fileManager.delete(target, { ignoreMissing: true });
       }
     }
     protocol.response(ctx, true);
@@ -414,7 +416,8 @@ routerApp.on("file/compress", async (ctx, data) => {
       if (type === 1) {
         await fileManager.zip(source, targets, code);
       } else {
-        await fileManager.unzip(source, targets, code);
+        const ownership = await resolveInstanceFileOwnership(instance);
+        await fileManager.unzip(source, targets, code, ownership);
       }
       protocol.response(ctx, true);
     } catch (error: any) {

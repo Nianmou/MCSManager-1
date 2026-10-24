@@ -11,6 +11,7 @@ export default class InstanceConfig implements IGlobalInstanceConfig {
   public nickname = "Undefined";
   public startCommand = "";
   public stopCommand = "^C";
+  public stopTimeout = 0;
   public cwd = ".";
   public ie = "utf-8";
   public oe = "utf-8";
@@ -62,7 +63,7 @@ export default class InstanceConfig implements IGlobalInstanceConfig {
 
   // Extend
   public docker: IGlobalInstanceDockerConfig = {
-    updateCommandImage: "",
+    updateCommandImage: "HOST",
     containerName: "",
     image: "",
     uploadSpeedLimit: 0,
@@ -90,7 +91,9 @@ export default class InstanceConfig implements IGlobalInstanceConfig {
     gpuEnabled: false,
     gpuCount: -1,
     gpuDeviceIds: [],
-    gpuDriver: "nvidia"
+    gpuDriver: "nvidia",
+    deviceReadBps: [],
+    deviceWriteBps: []
   };
 
   public pingConfig = {

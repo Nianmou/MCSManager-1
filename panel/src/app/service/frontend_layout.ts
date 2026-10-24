@@ -434,6 +434,28 @@ function getDefaultFrontendLayoutConfig(): IPageLayoutConfig[] {
       ]
     },
     {
+      page: "/audit",
+      items: [
+        {
+          id: getRandomId(),
+          meta: {},
+          type: "AuditLog",
+          title: t("TXT_CODE_ea1600d2"),
+          width: 12,
+          height: LayoutCardHeight.AUTO,
+          disableDelete: true
+        },
+        {
+          id: getRandomId(),
+          meta: {},
+          type: "EmptyCard",
+          title: "",
+          width: 12,
+          height: LayoutCardHeight.MINI
+        }
+      ]
+    },
+    {
       page: "/node",
       items: [
         {
@@ -603,20 +625,6 @@ function getDefaultFrontendLayoutConfig(): IPageLayoutConfig[] {
           title: t("TXT_CODE_ccb60658"),
           width: 4,
           height: LayoutCardHeight.AUTO,
-          disableDelete: true
-        }
-      ]
-    },
-    {
-      page: "/shop",
-      items: [
-        {
-          id: getRandomId(),
-          meta: {},
-          type: "ShelvesCard",
-          title: t("TXT_CODE_381f8f22"),
-          width: 12,
-          height: LayoutCardHeight.LARGE,
           disableDelete: true
         }
       ]

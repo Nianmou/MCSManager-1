@@ -1,3 +1,13 @@
+import { DEFAULT_UPDATE_SOURCE_URL } from "mcsmanager-common";
+
+// Data-plane mode values. String-valued so the persisted JSON and HTTP API
+// payload stay `"direct"` / `"proxy"` (backward compatible with existing
+// `panel/data/SystemConfig/config.json` files and API clients).
+export enum DataPlaneMode {
+  Direct = "direct",
+  Proxy = "proxy"
+}
+
 // @Entity
 export default class SystemConfig {
   // HTTP service port, IP and path prefix
@@ -15,6 +25,21 @@ export default class SystemConfig {
 
   // Distributed forwarding mode
   forwardType: number = 1;
+
+  // Data-plane mode: DataPlaneMode.Direct (browser connects to the daemon directly) or
+  // DataPlaneMode.Proxy (browser only reaches the panel, which reverse-proxies file
+  // download/upload and terminal IO to the daemon so the daemon port never needs to be
+  // public). Hot-reload, no restart.
+  //
+  // Class-level default is Direct so a config that predates this field (loaded by
+  // StorageSubsystem.load, which deep-copies persisted JSON onto a fresh instance)
+  // falls back to Direct on upgrade. initSystemConfig overrides to Proxy only on the
+  // fresh-install branch (no config file on first boot).
+  dataPlane: DataPlaneMode = DataPlaneMode.Direct;
+
+  // Symmetric HMAC secret used to sign browser-facing proxy data-plane tokens (panel self-signs
+  // and self-verifies; never shared with the daemon). Generated lazily on first use and persisted.
+  gatewaySecret = "";
 
   // Whether to allow cross-domain requests
   crossDomain: boolean = false;
@@ -51,13 +76,34 @@ export default class SystemConfig {
   language = "en_us";
 
   // Quick installation address
-  presetPackAddr = "https://script.mcsmanager.com/market-v2.json";
+  presetPackAddr = "https://script.mcsmanager.com/market.json";
 
   // Redis address (Experimental Features)
   redisUrl = "";
 
   // Whether to allow users to edit the start & update command of Docker instances
   allowChangeCmd = false;
+
+  // This option determines whether the entire panel can use an API key.
+  // If set to fail, even if the user has already generated an API key,
+  // they will no longer be able to use it.
+  enableApiKey: boolean | "ONLY_ADMIN" = false;
+
+  // Operation audit log settings
+  // Whether to record user operations (audit log)
+  operationLogEnabled = true;
+  // Rotate to a new JSONL file after this many records (a new file also starts each day)
+  operationLogMaxLinesPerFile = 200;
+  // Delete log files older than N days (0 = keep forever)
+  operationLogKeepDays = 30;
+  // Delete the oldest log files when the total record count exceeds N (0 = unlimited)
+  operationLogMaxTotalLines = 20000;
+  // Per-category recording switches
+  operationLogRecordLogin = true;
+  operationLogRecordInstance = true;
+  operationLogRecordFile = true;
+  operationLogRecordUser = true;
+  operationLogRecordSystem = true;
 
   // -----
   // After it is enabled, you can connect to the redeem.mcsmanager.com platform
@@ -87,7 +133,12 @@ export default class SystemConfig {
   // Shared
   ssoClientId = "";
   ssoClientSecret = "";
+  ssoTokenAuthMethod: "auto" | "client_secret_basic" | "client_secret_post" = "auto";
   ssoCallbackUrl = "";
+  // Comma-separated allowlist of hosts allowed to appear in a derived
+  // redirect_uri. Only consulted when ssoCallbackUrl is empty AND
+  // reverseProxyMode is enabled; empty means "trust no request header".
+  ssoAllowedRedirectHosts = "";
 
   // Whether to enable SSL/TLS (HTTPS)
   ssl = false;
@@ -95,4 +146,10 @@ export default class SystemConfig {
   sslPemPath = "";
   // SSL private key file path (.key)
   sslKeyPath = "";
+
+  // ---- Update source (manifest URL for manual self-update) ----
+  // Full URL to a manifest describing available updates, e.g. the official
+  // GitHub Release manifest (DEFAULT_UPDATE_SOURCE_URL). Empty => update info
+  // unavailable.
+  updateSourceUrl = DEFAULT_UPDATE_SOURCE_URL;
 }

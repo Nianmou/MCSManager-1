@@ -3,9 +3,9 @@ import formidable from "formidable";
 import * as fs from "fs-extra";
 import path from "path";
 import { v4 } from "uuid";
-import FileManager from "../../../../daemon/src/service/system_file";
+import { diffConfig } from "../common/config_diff";
 import { MARKET_CACHE_FILE_PATH, SAVE_DIR_PATH } from "../const";
-import SystemConfig from "../entity/setting";
+import SystemConfig, { DataPlaneMode } from "../entity/setting";
 import { ROLE } from "../entity/user";
 import { $t, i18next } from "../i18n";
 import { speedLimit } from "../middleware/limit";
@@ -16,10 +16,11 @@ import {
   setFrontendLayoutConfig
 } from "../service/frontend_layout";
 import { logger } from "../service/log";
-import { operationLogger } from "../service/operation_logger";
+import { getOperationLoggerOperator, operationLogger } from "../service/operation_logger";
 import remoteService from "../service/remote_service";
 import userSystem from "../service/user_service";
 import { saveSystemConfig, systemConfig } from "../setting";
+import { checkFileName } from "../utils/safe";
 import { checkBusinessMode } from "../version";
 
 const router = new Router({ prefix: "/overview" });
@@ -27,7 +28,11 @@ const router = new Router({ prefix: "/overview" });
 // [Top-level Permission]
 // Get panel configuration items
 router.get("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
-  ctx.body = systemConfig;
+  if (!systemConfig) {
+    ctx.body = systemConfig;
+    return;
+  }
+  ctx.body = { ...systemConfig, ssoClientSecret: "" };
 });
 
 // [Top-level Permission]
@@ -35,6 +40,8 @@ router.get("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
 router.put("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
   const config = ctx.request.body as Partial<SystemConfig>;
   if (config && systemConfig) {
+    // Snapshot for the audit log (masked diff is computed after all mutations)
+    const systemConfigBefore = JSON.parse(JSON.stringify(systemConfig)) as SystemConfig;
     if (config.httpIp != null) systemConfig.httpIp = config.httpIp;
     if (config.httpPort != null) systemConfig.httpPort = config.httpPort;
     if (config.prefix != null) systemConfig.prefix = config.prefix;
@@ -50,6 +57,12 @@ router.put("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
       systemConfig.totpDriftToleranceSteps = config.totpDriftToleranceSteps;
     if (config.loginCheckIp != null) systemConfig.loginCheckIp = config.loginCheckIp;
     if (config.forwardType != null) systemConfig.forwardType = Number(config.forwardType);
+    if (config.dataPlane != null) {
+      const mode = String(config.dataPlane);
+      if (mode !== DataPlaneMode.Direct && mode !== DataPlaneMode.Proxy)
+        throw new Error("dataPlane must be 'direct' or 'proxy'");
+      systemConfig.dataPlane = mode as DataPlaneMode;
+    }
     if (config.dataPort != null) systemConfig.dataPort = Number(config.dataPort);
     if (config.loginInfo != null) systemConfig.loginInfo = String(config.loginInfo);
     if (config.canFileManager != null) systemConfig.canFileManager = Boolean(config.canFileManager);
@@ -60,6 +73,30 @@ router.put("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
     if (config.allowChangeCmd != null) systemConfig.allowChangeCmd = Boolean(config.allowChangeCmd);
     if (config.registerCode != null) systemConfig.registerCode = String(config.registerCode);
     if (config.panelId != null) systemConfig.panelId = String(config.panelId);
+    if (config.enableApiKey != null) systemConfig.enableApiKey = config.enableApiKey;
+
+    // Update source (panel self-update manifest URL)
+    if (config.updateSourceUrl != null)
+      systemConfig.updateSourceUrl = String(config.updateSourceUrl);
+
+    if (config.operationLogEnabled != null)
+      systemConfig.operationLogEnabled = config.operationLogEnabled;
+    if (config.operationLogMaxLinesPerFile != null)
+      systemConfig.operationLogMaxLinesPerFile = config.operationLogMaxLinesPerFile;
+    if (config.operationLogKeepDays != null)
+      systemConfig.operationLogKeepDays = config.operationLogKeepDays;
+    if (config.operationLogMaxTotalLines != null)
+      systemConfig.operationLogMaxTotalLines = config.operationLogMaxTotalLines;
+    if (config.operationLogRecordLogin != null)
+      systemConfig.operationLogRecordLogin = config.operationLogRecordLogin;
+    if (config.operationLogRecordInstance != null)
+      systemConfig.operationLogRecordInstance = config.operationLogRecordInstance;
+    if (config.operationLogRecordFile != null)
+      systemConfig.operationLogRecordFile = config.operationLogRecordFile;
+    if (config.operationLogRecordUser != null)
+      systemConfig.operationLogRecordUser = config.operationLogRecordUser;
+    if (config.operationLogRecordSystem != null)
+      systemConfig.operationLogRecordSystem = config.operationLogRecordSystem;
 
     if (config.presetPackAddr != null) {
       // clear cache
@@ -90,31 +127,62 @@ router.put("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
     }
     const ssoType = systemConfig.ssoType || "oidc";
 
+    // SSO Token Endpoint client authentication method
+    if (config.ssoTokenAuthMethod != null) {
+      const m = String(config.ssoTokenAuthMethod);
+      if (m !== "auto" && m !== "client_secret_basic" && m !== "client_secret_post") {
+        throw new Error(
+          "ssoTokenAuthMethod must be 'auto', 'client_secret_basic' or 'client_secret_post'"
+        );
+      }
+      systemConfig.ssoTokenAuthMethod = m;
+    }
+
     // SSO core fields
     {
-      const wantEnable = config.ssoEnabled != null ? Boolean(config.ssoEnabled) : systemConfig.ssoEnabled;
-      const clientId = config.ssoClientId != null ? String(config.ssoClientId) : systemConfig.ssoClientId;
-      const clientSecret = config.ssoClientSecret != null ? String(config.ssoClientSecret) : systemConfig.ssoClientSecret;
+      const wantEnable =
+        config.ssoEnabled != null ? Boolean(config.ssoEnabled) : systemConfig.ssoEnabled;
+      const clientId =
+        config.ssoClientId != null ? String(config.ssoClientId) : systemConfig.ssoClientId;
+      const clientSecret = config.ssoClientSecret
+        ? String(config.ssoClientSecret)
+        : systemConfig.ssoClientSecret;
 
       if (ssoType === "oidc") {
         const issuer = config.ssoIssuer != null ? String(config.ssoIssuer) : systemConfig.ssoIssuer;
-        if (issuer && !issuer.startsWith("https://") && !issuer.startsWith("http://")) {
-          throw new Error("SSO Issuer URL must use http(s) protocol");
+        if (issuer && !issuer.startsWith("https://")) {
+          throw new Error("SSO Issuer URL must use the https protocol");
         }
         if (wantEnable && (!issuer?.trim() || !clientId?.trim() || !clientSecret?.trim())) {
-          throw new Error("Cannot enable SSO (OIDC): Issuer, Client ID, and Client Secret are required");
+          throw new Error(
+            "Cannot enable SSO (OIDC): Issuer, Client ID, and Client Secret are required"
+          );
         }
-        if (issuer?.trim() && clientId?.trim() && clientSecret?.trim()) {
-          const { verifyIssuer, clearOIDCCache } = require("../service/sso_service");
+        const oidcCredentialsChanged =
+          issuer !== systemConfig.ssoIssuer ||
+          clientId !== systemConfig.ssoClientId ||
+          clientSecret !== systemConfig.ssoClientSecret;
+        const needVerify =
+          wantEnable &&
+          Boolean(issuer?.trim() && clientId?.trim() && clientSecret?.trim()) &&
+          (!systemConfig.ssoEnabled || oidcCredentialsChanged);
+        if (needVerify) {
+          const { verifyIssuer } = require("../service/sso_service");
           await verifyIssuer(issuer, clientId, clientSecret);
-          clearOIDCCache();
         }
         if (config.ssoIssuer != null) systemConfig.ssoIssuer = issuer;
       } else {
         // OAuth 2.0
-        const authorizeUrl = config.ssoAuthorizeUrl != null ? String(config.ssoAuthorizeUrl) : systemConfig.ssoAuthorizeUrl;
-        const tokenUrl = config.ssoTokenUrl != null ? String(config.ssoTokenUrl) : systemConfig.ssoTokenUrl;
-        const userinfoUrl = config.ssoUserinfoUrl != null ? String(config.ssoUserinfoUrl) : systemConfig.ssoUserinfoUrl;
+        const authorizeUrl =
+          config.ssoAuthorizeUrl != null
+            ? String(config.ssoAuthorizeUrl)
+            : systemConfig.ssoAuthorizeUrl;
+        const tokenUrl =
+          config.ssoTokenUrl != null ? String(config.ssoTokenUrl) : systemConfig.ssoTokenUrl;
+        const userinfoUrl =
+          config.ssoUserinfoUrl != null
+            ? String(config.ssoUserinfoUrl)
+            : systemConfig.ssoUserinfoUrl;
 
         const validateUrl = (url: string, name: string) => {
           if (url && !url.startsWith("https://") && !url.startsWith("http://")) {
@@ -125,8 +193,17 @@ router.put("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
         validateUrl(tokenUrl, "Token URL");
         validateUrl(userinfoUrl, "Userinfo URL");
 
-        if (wantEnable && (!authorizeUrl?.trim() || !tokenUrl?.trim() || !userinfoUrl?.trim() || !clientId?.trim() || !clientSecret?.trim())) {
-          throw new Error("Cannot enable SSO (OAuth 2.0): Authorize URL, Token URL, Userinfo URL, Client ID, and Client Secret are required");
+        if (
+          wantEnable &&
+          (!authorizeUrl?.trim() ||
+            !tokenUrl?.trim() ||
+            !userinfoUrl?.trim() ||
+            !clientId?.trim() ||
+            !clientSecret?.trim())
+        ) {
+          throw new Error(
+            "Cannot enable SSO (OAuth 2.0): Authorize URL, Token URL, Userinfo URL, Client ID, and Client Secret are required"
+          );
         }
 
         if (config.ssoAuthorizeUrl != null) systemConfig.ssoAuthorizeUrl = authorizeUrl;
@@ -136,17 +213,20 @@ router.put("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
 
       if (config.ssoEnabled != null) systemConfig.ssoEnabled = wantEnable;
       if (config.ssoClientId != null) systemConfig.ssoClientId = clientId;
-      if (config.ssoClientSecret != null) systemConfig.ssoClientSecret = clientSecret;
+      if (config.ssoClientSecret) systemConfig.ssoClientSecret = clientSecret;
     }
 
-    if (config.ssoUserIdField != null) systemConfig.ssoUserIdField = String(config.ssoUserIdField) || "id";
+    if (config.ssoUserIdField != null)
+      systemConfig.ssoUserIdField = String(config.ssoUserIdField) || "id";
 
     // Unbind all SSO users when identity-critical fields change
     {
       const typeChanged = systemConfig.ssoType !== prevSsoType;
       const issuerChanged = ssoType === "oidc" && systemConfig.ssoIssuer !== prevSsoIssuer;
-      const userinfoChanged = ssoType === "oauth2" && systemConfig.ssoUserinfoUrl !== prevSsoUserinfoUrl;
-      const userIdFieldChanged = ssoType === "oauth2" && systemConfig.ssoUserIdField !== prevSsoUserIdField;
+      const userinfoChanged =
+        ssoType === "oauth2" && systemConfig.ssoUserinfoUrl !== prevSsoUserinfoUrl;
+      const userIdFieldChanged =
+        ssoType === "oauth2" && systemConfig.ssoUserIdField !== prevSsoUserIdField;
 
       if (typeChanged || issuerChanged || userinfoChanged || userIdFieldChanged) {
         const count = await userSystem.unbindAllSso();
@@ -157,30 +237,85 @@ router.put("/setting", permission({ level: ROLE.ADMIN }), async (ctx) => {
     }
     if (config.ssoScopes != null) systemConfig.ssoScopes = String(config.ssoScopes);
     if (config.ssoOnlyMode != null) systemConfig.ssoOnlyMode = Boolean(config.ssoOnlyMode);
-    if (config.ssoAutoRedirect != null) systemConfig.ssoAutoRedirect = Boolean(config.ssoAutoRedirect);
-    if (config.ssoProviderName != null) systemConfig.ssoProviderName = String(config.ssoProviderName);
+    if (config.ssoAutoRedirect != null)
+      systemConfig.ssoAutoRedirect = Boolean(config.ssoAutoRedirect);
+    if (config.ssoProviderName != null)
+      systemConfig.ssoProviderName = String(config.ssoProviderName);
     if (config.ssoIconUrl != null) {
       const iconUrl = String(config.ssoIconUrl);
-      if (iconUrl && !iconUrl.startsWith("https://") && !iconUrl.startsWith("http://") && !iconUrl.startsWith("/")) {
+      if (
+        iconUrl &&
+        !iconUrl.startsWith("https://") &&
+        !iconUrl.startsWith("http://") &&
+        !iconUrl.startsWith("/")
+      ) {
         throw new Error("SSO icon URL must use http(s) protocol or be a relative path");
       }
       systemConfig.ssoIconUrl = iconUrl;
     }
     if (config.ssoCallbackUrl != null) {
       const cbUrl = String(config.ssoCallbackUrl);
-      if (cbUrl && !cbUrl.startsWith("https://") && !cbUrl.startsWith("http://")) {
-        throw new Error("SSO Callback URL must use http(s) protocol");
+      if (cbUrl) {
+        if (!cbUrl.startsWith("https://") && !cbUrl.startsWith("http://")) {
+          throw new Error("SSO Callback URL must use http(s) protocol");
+        }
+        let parsed: URL;
+        try {
+          parsed = new URL(cbUrl);
+        } catch {
+          throw new Error("SSO Callback URL is not a valid absolute URL");
+        }
+        if (parsed.search || parsed.hash) {
+          throw new Error("SSO Callback URL must not contain a query string or fragment");
+        }
+        if (!parsed.pathname.endsWith("/api/auth/sso/callback")) {
+          throw new Error("SSO Callback URL must end with /api/auth/sso/callback");
+        }
       }
       systemConfig.ssoCallbackUrl = cbUrl;
     }
+    if (config.ssoAllowedRedirectHosts != null) {
+      const raw = String(config.ssoAllowedRedirectHosts);
+      const hosts = raw
+        .split(",")
+        .map((s) => s.trim().toLowerCase())
+        .filter(Boolean);
+      for (const h of hosts) {
+        let ok = false;
+        try {
+          const u = new URL(`http://${h}`);
+          ok =
+            u.host === h &&
+            u.pathname === "/" &&
+            !u.username &&
+            !u.password &&
+            !u.search &&
+            !u.hash;
+        } catch {
+          ok = false;
+        }
+        if (!ok) throw new Error(`Invalid SSO allowed redirect host: ${h}`);
+      }
+      systemConfig.ssoAllowedRedirectHosts = hosts.join(",");
+    }
 
-    operationLogger.log("system_config_change", {
-      operator_ip: ctx.ip,
-      operator_name: ctx.session?.["userName"]
-    });
+    const diff = diffConfig(systemConfigBefore, JSON.parse(JSON.stringify(systemConfig)));
+    if (diff) {
+      operationLogger.log(
+        "system_config_change",
+        {
+          ...getOperationLoggerOperator(ctx),
+          config_before: diff.before,
+          config_after: diff.after
+        },
+        "warning",
+        config.operationLogEnabled !== systemConfigBefore.operationLogEnabled
+      );
+    }
 
     saveSystemConfig(systemConfig);
     checkBusinessMode();
+    operationLogger.runRetention();
     ctx.body = "OK";
     return;
   }
@@ -240,8 +375,7 @@ router.post("/upload_assets", permission({ level: ROLE.ADMIN }), async (ctx) => 
     if (!tmpFile.filepath || !fs.existsSync(tmpFile.filepath))
       throw new Error($t("TXT_CODE_1a499109"));
     const newFileName = v4() + path.extname(tmpFile.originalFilename || "");
-    if (!FileManager.checkFileName(newFileName))
-      throw new Error("Access denied: Malformed file name");
+    if (!checkFileName(newFileName)) throw new Error("Access denied: Malformed file name");
     const saveDirPath = path.join(process.cwd(), SAVE_DIR_PATH);
     if (!fs.existsSync(saveDirPath)) fs.mkdirsSync(saveDirPath);
     await fs.move(tmpFile.filepath, path.join(saveDirPath, newFileName));

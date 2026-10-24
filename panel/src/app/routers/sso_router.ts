@@ -5,7 +5,7 @@ import { $t } from "../i18n";
 import permission from "../middleware/permission";
 import validator from "../middleware/validator";
 import { logger } from "../service/log";
-import { operationLogger } from "../service/operation_logger";
+import { getOperationLoggerOperator, operationLogger } from "../service/operation_logger";
 import { checkBanIp, loginSuccess } from "../service/passport_service";
 import {
   buildAuthorizationUrl,
@@ -14,13 +14,23 @@ import {
   generateState,
   getCallbackUrl,
   getPublicSsoConfig,
-  handleOIDCCallback,
-  handleOAuth2Callback
+  handleOAuth2Callback,
+  handleOIDCCallback
 } from "../service/sso_service";
 import userSystem, { TwoFactorError } from "../service/user_service";
 import { systemConfig } from "../setting";
 
 const router = new Router({ prefix: "/auth/sso" });
+
+const SSO_BIND_SESSION_TTL = 10 * 60 * 1000;
+
+function hasPendingSsoBind(ctx: Koa.ParameterizedContext): boolean {
+  const ssoSub = ctx.session?.["ssoBindSub"];
+  const ssoBindTimestamp = ctx.session?.["ssoBindTimestamp"];
+  if (!ssoSub || !ssoBindTimestamp) return false;
+  if (Date.now() - ssoBindTimestamp > SSO_BIND_SESSION_TTL) return false;
+  return !userSystem.getUserBySsoSub(ssoSub);
+}
 
 // [Public] Return SSO configuration (no secrets)
 router.get(
@@ -52,15 +62,20 @@ router.get(
       const state = generateState();
       const nonce = generateNonce();
       const codeVerifier = generateCodeVerifier();
+      // Resolve the redirect_uri ONCE, from trusted config only, and persist it
+      // in the session. The callback stage reuses this exact value for the token
+      // exchange so the two stages can never disagree.
+      const callbackUrl = getCallbackUrl(ctx);
 
       if (!ctx.session) throw new Error("Session is null");
       ctx.session["ssoState"] = state;
       ctx.session["ssoNonce"] = nonce;
       ctx.session["ssoCodeVerifier"] = codeVerifier;
       ctx.session["ssoTimestamp"] = Date.now();
+      ctx.session["ssoRedirectUri"] = callbackUrl;
       ctx.session.save();
 
-      const url = await buildAuthorizationUrl(state, nonce, codeVerifier, ctx);
+      const url = await buildAuthorizationUrl(state, nonce, codeVerifier, callbackUrl);
       ctx.redirect(url);
     } catch (err: any) {
       const oauthDesc = err.error_description || err.message || "Authorization redirect failed";
@@ -94,16 +109,21 @@ router.get(
     const expectedNonce = ctx.session["ssoNonce"];
     const codeVerifier = ctx.session["ssoCodeVerifier"];
     const ssoTimestamp = ctx.session["ssoTimestamp"];
+    // The redirect_uri pinned by /authorize. Reusing it (instead of deriving a
+    // fresh one from this request's headers) prevents an attacker from pointing
+    // the token exchange at a different origin between the two stages.
+    const ssoRedirectUri = ctx.session["ssoRedirectUri"];
 
     // Clean up session SSO data immediately
     delete ctx.session["ssoState"];
     delete ctx.session["ssoNonce"];
     delete ctx.session["ssoCodeVerifier"];
     delete ctx.session["ssoTimestamp"];
+    delete ctx.session["ssoRedirectUri"];
     ctx.session.save();
 
     const isOAuth2 = systemConfig?.ssoType === "oauth2";
-    if (!expectedState || !codeVerifier || (!isOAuth2 && !expectedNonce)) {
+    if (!expectedState || !codeVerifier || !ssoRedirectUri || (!isOAuth2 && !expectedNonce)) {
       ctx.redirect("/#/login?sso_error=invalid_sso_session");
       return;
     }
@@ -129,19 +149,20 @@ router.get(
 
     try {
       let sub: string;
-      let claims: Record<string, unknown>;
 
       if (isOAuth2) {
         const code = callbackUrl.searchParams.get("code");
         if (!code) throw new Error("OAuth 2.0 callback missing code parameter");
         const stateParam = callbackUrl.searchParams.get("state");
         if (stateParam !== expectedState) throw new Error("OAuth 2.0 state mismatch");
-        ({ sub, claims } = await handleOAuth2Callback(code, codeVerifier, ctx));
+        ({ sub } = await handleOAuth2Callback(code, codeVerifier, ssoRedirectUri));
       } else {
-        const configuredCallback = getCallbackUrl(ctx);
-        const reconstructedUrl = new URL(configuredCallback);
+        // Rebuild the callback URL from the session-pinned redirect_uri (trusted)
+        // plus THIS request's query string (code/state), matching the exact
+        // redirect_uri the IdP saw during /authorize.
+        const reconstructedUrl = new URL(ssoRedirectUri);
         reconstructedUrl.search = callbackUrl.search;
-        ({ sub, claims } = await handleOIDCCallback(
+        ({ sub } = await handleOIDCCallback(
           reconstructedUrl,
           expectedState,
           expectedNonce,
@@ -167,7 +188,6 @@ router.get(
 
       // Not bound yet - redirect to bind page
       ctx.session!["ssoBindSub"] = sub;
-      ctx.session!["ssoBindClaims"] = JSON.stringify(claims);
       ctx.session!["ssoBindTimestamp"] = Date.now();
       ctx.session!.save();
 
@@ -183,6 +203,14 @@ router.get(
       });
       ctx.redirect(`/#/login?${params.toString()}`);
     }
+  }
+);
+
+router.get(
+  "/bind-status",
+  permission({ token: false, level: null, speedLimit: false }),
+  async (ctx: Koa.ParameterizedContext) => {
+    ctx.body = { pending: Boolean(systemConfig?.ssoEnabled) && hasPendingSsoBind(ctx) };
   }
 );
 
@@ -210,9 +238,8 @@ router.post(
     }
 
     // Reject if the bind session is older than 10 minutes
-    if (!ssoBindTimestamp || Date.now() - ssoBindTimestamp > 10 * 60 * 1000) {
+    if (!ssoBindTimestamp || Date.now() - ssoBindTimestamp > SSO_BIND_SESSION_TTL) {
       delete ctx.session["ssoBindSub"];
-      delete ctx.session["ssoBindClaims"];
       delete ctx.session["ssoBindTimestamp"];
       ctx.session.save();
       throw new Error("SSO binding session expired");
@@ -222,7 +249,6 @@ router.post(
     const alreadyBound = userSystem.getUserBySsoSub(ssoSub);
     if (alreadyBound) {
       delete ctx.session["ssoBindSub"];
-      delete ctx.session["ssoBindClaims"];
       delete ctx.session["ssoBindTimestamp"];
       ctx.session.save();
       throw new Error("This SSO account is already bound to another user");
@@ -254,7 +280,6 @@ router.post(
 
     // Clean up session
     delete ctx.session["ssoBindSub"];
-    delete ctx.session["ssoBindClaims"];
     delete ctx.session["ssoBindTimestamp"];
 
     const token = loginSuccess(ctx, userName);
@@ -291,9 +316,8 @@ router.post(
       throw new Error("No pending SSO binding session");
     }
 
-    if (!ssoBindTimestamp || Date.now() - ssoBindTimestamp > 10 * 60 * 1000) {
+    if (!ssoBindTimestamp || Date.now() - ssoBindTimestamp > SSO_BIND_SESSION_TTL) {
       delete ctx.session["ssoBindSub"];
-      delete ctx.session["ssoBindClaims"];
       delete ctx.session["ssoBindTimestamp"];
       ctx.session.save();
       throw new Error("SSO binding session expired");
@@ -302,7 +326,6 @@ router.post(
     const alreadyBound = userSystem.getUserBySsoSub(ssoSub);
     if (alreadyBound) {
       delete ctx.session["ssoBindSub"];
-      delete ctx.session["ssoBindClaims"];
       delete ctx.session["ssoBindTimestamp"];
       ctx.session.save();
       throw new Error("This SSO account is already bound to another user");
@@ -321,7 +344,6 @@ router.post(
     await userSystem.bindSso(user.uuid, ssoSub);
 
     delete ctx.session["ssoBindSub"];
-    delete ctx.session["ssoBindClaims"];
     delete ctx.session["ssoBindTimestamp"];
     ctx.session.save();
 
@@ -349,11 +371,14 @@ router.put(
 
     await userSystem.unbindSso(uuid);
 
-    operationLogger.log("sso_unbind", {
-      operator_ip: ctx.ip,
-      operator_name: ctx.session?.["userName"],
-      target_user_name: user.userName
-    });
+    operationLogger.log(
+      "sso_unbind",
+      {
+        ...getOperationLoggerOperator(ctx),
+        target_user_name: user.userName
+      },
+      "warning"
+    );
 
     logger.info(`[SSO] Admin unbound SSO for user ${user.userName}`);
     ctx.body = true;

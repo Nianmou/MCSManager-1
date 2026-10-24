@@ -1,8 +1,12 @@
 import Koa from "koa";
 import { GlobalVariable } from "mcsmanager-common";
+import { ROLE } from "../entity/user";
 import { $t } from "../i18n";
 import { getUuidByApiKey, ILLEGAL_ACCESS_KEY, isAjax, logout } from "../service/passport_service";
 import userSystem from "../service/user_service";
+import { systemConfig } from "../setting";
+import { isUnsafeIntegrationTestRequest } from "../utils/integration_test_mode";
+import { checkSafeName } from "../utils/safe";
 
 /**
  * @description Request speed limit, 8 requests per second
@@ -44,6 +48,11 @@ function apiError(ctx: Koa.ParameterizedContext) {
   ctx.body = `${$t("TXT_CODE_permission.apiError")}`;
 }
 
+function disabledApiKey(ctx: Koa.ParameterizedContext) {
+  ctx.status = 403;
+  ctx.body = $t("TXT_CODE_db253979");
+}
+
 function tooFast(ctx: Koa.ParameterizedContext) {
   ctx.status = 500;
   ctx.body = `${$t("TXT_CODE_permission.tooFast")}`;
@@ -58,6 +67,15 @@ interface IPermissionCfg {
 // Basic user permission middleware
 export default (parameter: IPermissionCfg) => {
   return async (ctx: Koa.ParameterizedContext, next: Function) => {
+    // Unsafe integration-test mode bypass: when the panel is started with
+    // `--Unsafe-Integration-Test-Mode=<key>` (parameter name case-insensitive)
+    // and the request carries an `x-request-api-key` header equal to `<key>`,
+    // skip every permission check below and go straight to the route handler.
+    // See utils/integration_test_mode.ts for the security warning.
+    if (isUnsafeIntegrationTestRequest(ctx.request?.header["x-request-api-key"])) {
+      return await next();
+    }
+
     if (
       (parameter.speedLimit == null || parameter.speedLimit === true) &&
       Number(parameter.level) < 10
@@ -71,8 +89,18 @@ export default (parameter: IPermissionCfg) => {
     // If it is an API request, perform API-level permission judgment
     const key = ctx.request?.header["x-request-api-key"] || ctx.query.apikey;
     if (key) {
+      const enableApiKey = systemConfig?.enableApiKey || false;
+      if (!enableApiKey) return disabledApiKey(ctx);
+
+      // Validate apiKey: only A-Z, a-z, 0-9 are allowed
       const apiKey = String(key);
+      if (!checkSafeName(apiKey)) {
+        return apiError(ctx);
+      }
+
       const user = getUuidByApiKey(apiKey);
+      if (user && enableApiKey === "ONLY_ADMIN" && user.permission < ROLE.ADMIN)
+        return disabledApiKey(ctx);
       if (user && user.permission >= Number(parameter.level)) {
         return await next();
       } else {

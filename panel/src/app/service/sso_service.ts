@@ -4,10 +4,47 @@ import { systemConfig } from "../setting";
 import { logger } from "./log";
 import crypto from "crypto";
 
+// ─── Token Endpoint client authentication ───
+
+const SSO_TOKEN_AUTH_METHODS = ["auto", "client_secret_basic", "client_secret_post"] as const;
+type SsoTokenAuthMethod = (typeof SSO_TOKEN_AUTH_METHODS)[number];
+
+function getTokenAuthMethod(): SsoTokenAuthMethod {
+  const method = systemConfig?.ssoTokenAuthMethod as SsoTokenAuthMethod;
+  return SSO_TOKEN_AUTH_METHODS.includes(method) ? method : "auto";
+}
+
+// Delegating ClientAuth: the method is resolved on every token request, so a
+// config change takes effect immediately without rebuilding the cached Configuration.
+function buildClientAuth(): oidc.ClientAuth {
+  const basic = oidc.ClientSecretBasic();
+  const post = oidc.ClientSecretPost();
+  return (as, client, body, headers) => {
+    const method = getTokenAuthMethod();
+    const useBasic =
+      method === "client_secret_basic"
+        ? true
+        : method === "client_secret_post"
+          ? false
+          : // auto: follow the discovery document, keep posting when it says nothing
+            as.token_endpoint_auth_methods_supported?.includes("client_secret_basic") === true;
+    (useBasic ? basic : post)(as, client, body, headers);
+  };
+}
+
 // ─── OIDC Cache ───
 
 let cachedConfig: oidc.Configuration | null = null;
-let cachedIssuer = "";
+let cachedConfigKey = "";
+
+function oidcConfigKey(): string {
+  return crypto
+    .createHash("sha256")
+    .update(
+      [systemConfig?.ssoIssuer, systemConfig?.ssoClientId, systemConfig?.ssoClientSecret].join("\n")
+    )
+    .digest("hex");
+}
 
 export async function getOIDCConfig(): Promise<oidc.Configuration> {
   if (!systemConfig) throw new Error("System config not initialized");
@@ -16,33 +53,36 @@ export async function getOIDCConfig(): Promise<oidc.Configuration> {
     throw new Error("SSO configuration is incomplete");
   }
 
-  if (cachedConfig && cachedIssuer === systemConfig.ssoIssuer) {
+  const configKey = oidcConfigKey();
+  if (cachedConfig && cachedConfigKey === configKey) {
     return cachedConfig;
   }
 
   try {
     const issuerUrl = new URL(systemConfig.ssoIssuer);
-    cachedConfig = await oidc.discovery(issuerUrl, systemConfig.ssoClientId, systemConfig.ssoClientSecret);
-    cachedIssuer = systemConfig.ssoIssuer;
-    logger.info("[SSO] OIDC discovery completed for: " + systemConfig.ssoIssuer);
+    cachedConfig = await oidc.discovery(
+      issuerUrl,
+      systemConfig.ssoClientId,
+      systemConfig.ssoClientSecret,
+      buildClientAuth()
+    );
+    cachedConfigKey = configKey;
+    logger.info(
+      `[SSO] OIDC discovery completed for: ${systemConfig.ssoIssuer} (token endpoint auth: ${getTokenAuthMethod()})`
+    );
     return cachedConfig;
   } catch (err: any) {
     cachedConfig = null;
-    cachedIssuer = "";
+    cachedConfigKey = "";
     logger.error("[SSO] OIDC discovery failed: " + err.message);
     throw new Error("OIDC discovery failed. Check server logs for details.");
   }
 }
 
-export function clearOIDCCache() {
-  cachedConfig = null;
-  cachedIssuer = "";
-}
-
 export async function verifyIssuer(issuer: string, clientId: string, clientSecret: string): Promise<void> {
   try {
     const issuerUrl = new URL(issuer);
-    await oidc.discovery(issuerUrl, clientId, clientSecret);
+    await oidc.discovery(issuerUrl, clientId, clientSecret, buildClientAuth());
   } catch (err: any) {
     logger.error("[SSO] Issuer verification failed: " + err.message);
     throw new Error(`SSO Issuer verification failed: unable to reach ${issuer}/.well-known/openid-configuration`);
@@ -73,10 +113,9 @@ export async function buildAuthorizationUrl(
   state: string,
   nonce: string,
   codeVerifier: string,
-  ctx?: Koa.ParameterizedContext
+  callbackUrl: string
 ): Promise<string> {
   if (!systemConfig) throw new Error("System config not initialized");
-  const callbackUrl = getCallbackUrl(ctx);
   const codeChallenge = generateCodeChallenge(codeVerifier);
 
   if (systemConfig.ssoType === "oauth2") {
@@ -149,17 +188,27 @@ async function oauth2TokenExchange(
     grant_type: "authorization_code",
     code,
     redirect_uri: redirectUri,
-    client_id: systemConfig.ssoClientId,
-    client_secret: systemConfig.ssoClientSecret,
     code_verifier: codeVerifier
   });
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+    Accept: "application/json"
+  };
+
+  // There is no discovery document in OAuth 2.0 mode, so "auto" keeps posting the credentials.
+  if (getTokenAuthMethod() === "client_secret_basic") {
+    const credentials = `${encodeURIComponent(systemConfig.ssoClientId)}:${encodeURIComponent(
+      systemConfig.ssoClientSecret
+    )}`;
+    headers.Authorization = `Basic ${Buffer.from(credentials).toString("base64")}`;
+  } else {
+    body.set("client_id", systemConfig.ssoClientId);
+    body.set("client_secret", systemConfig.ssoClientSecret);
+  }
 
   const res = await fetch(systemConfig.ssoTokenUrl, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded",
-      Accept: "application/json"
-    },
+    headers,
     body: body.toString()
   });
 
@@ -201,11 +250,10 @@ async function oauth2Userinfo(accessToken: string): Promise<Record<string, unkno
 export async function handleOAuth2Callback(
   code: string,
   codeVerifier: string,
-  ctx?: Koa.ParameterizedContext
+  redirectUri: string
 ): Promise<{ sub: string; claims: Record<string, unknown> }> {
   if (!systemConfig) throw new Error("System config not initialized");
 
-  const redirectUri = getCallbackUrl(ctx);
   const accessToken = await oauth2TokenExchange(code, codeVerifier, redirectUri);
   const userinfo = await oauth2Userinfo(accessToken);
 
@@ -223,19 +271,45 @@ export async function handleOAuth2Callback(
 
 // ─── Shared Utilities ───
 
+// The redirect_uri is an OAuth/OIDC security boundary: it must NOT be derived
+// from client-controlled request headers. A forwarded host is trusted only when
+// it is explicitly allowlisted (ssoAllowedRedirectHosts) AND reverse-proxy mode
+// is enabled. An empty allowlist means "trust no forwarded header at all".
+function isTrustedRedirectHost(host: string): boolean {
+  if (!systemConfig) return false;
+  const allow = (systemConfig.ssoAllowedRedirectHosts || "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return allow.length > 0 && allow.includes(host.toLowerCase());
+}
+
+// Resolve the callback (redirect_uri) used both to build the authorization URL
+// and to perform the server-side token exchange. Resolution order:
+//   1. `ssoCallbackUrl` (explicit admin config) wins unconditionally.
+//   2. Only when reverse-proxy mode is enabled AND the forwarded host is on the
+//      `ssoAllowedRedirectHosts` allowlist may `X-Forwarded-Proto/Host` be used.
+//   3. Otherwise derive from server-side config (`ssl`/`httpIp`/`httpPort`).
+// `Host` / `X-Forwarded-*` are NEVER trusted without an explicit allowlist.
 export function getCallbackUrl(ctx?: Koa.ParameterizedContext): string {
   if (!systemConfig) throw new Error("System config not initialized");
-  if (systemConfig.ssoCallbackUrl) return systemConfig.ssoCallbackUrl;
   const prefix = systemConfig.prefix || "";
-  if (ctx) {
-    const proto = (ctx.get("X-Forwarded-Proto") || ctx.protocol || "http").split(",")[0].trim();
-    const host = (ctx.get("X-Forwarded-Host") || ctx.get("Host") || "").split(",")[0].trim();
-    if (host) {
+
+  if (systemConfig.ssoCallbackUrl) return systemConfig.ssoCallbackUrl;
+
+  if (ctx && systemConfig.reverseProxyMode) {
+    const proto = (ctx.get("X-Forwarded-Proto") || "https").split(",")[0].trim();
+    const host = (ctx.get("X-Forwarded-Host") || "").split(",")[0].trim();
+    if (host && isTrustedRedirectHost(host)) {
       return `${proto}://${host}${prefix}/api/auth/sso/callback`;
     }
   }
+
+  const proto = systemConfig.ssl ? "https" : "http";
+  const host =
+    systemConfig.httpIp && systemConfig.httpIp !== "0.0.0.0" ? systemConfig.httpIp : "localhost";
   const port = systemConfig.httpPort || 23333;
-  return `http://localhost:${port}${prefix}/api/auth/sso/callback`;
+  return `${proto}://${host}:${port}${prefix}/api/auth/sso/callback`;
 }
 
 export function getPublicSsoConfig() {

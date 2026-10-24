@@ -1,33 +1,19 @@
-import { ref, watch, createVNode, type Ref } from "vue";
-import { t } from "@/lang/i18n";
-import { Modal, message } from "ant-design-vue";
-import { ExclamationCircleOutlined } from "@ant-design/icons-vue";
-import uploadService from "@/services/uploadService";
 import { useFileManager } from "@/hooks/useFileManager";
+import { t } from "@/lang/i18n";
+import { ExclamationCircleOutlined } from "@ant-design/icons-vue";
+import { Modal, message } from "ant-design-vue";
+import { createVNode, ref, type Ref } from "vue";
+import { TAB_KEY_DOWNLOAD, TAB_KEY_MODS } from "./tabs";
 
 export function useModUpload(
   instanceId: string,
   daemonId: string,
   activeKey: Ref<string>,
-  loadMods: () => void
+  loadMods: () => void | Promise<void>
 ) {
   const { selectedFiles } = useFileManager(instanceId, daemonId);
   const opacity = ref(false);
   const fileInput = ref<HTMLInputElement>();
-
-  let uploading = false;
-  watch(
-    () => uploadService.uiData.value,
-    (newValue) => {
-      if (newValue.current) {
-        uploading = true;
-      } else if (uploading) {
-        uploading = false;
-        loadMods();
-      }
-    },
-    { immediate: true }
-  );
 
   const onUploadClick = () => {
     fileInput.value?.click();
@@ -44,14 +30,16 @@ export function useModUpload(
       return message.warning(t("TXT_CODE_MOD_UPLOAD_NO_FOLDER"));
     }
 
-    const targetDir = activeKey.value === "1" ? "mods" : "plugins";
-    await selectedFiles(validFiles, targetDir);
+    const targetDir = activeKey.value === TAB_KEY_MODS ? "mods" : "plugins";
+    await selectedFiles(validFiles, targetDir, async () => {
+      await loadMods();
+    });
     if (fileInput.value) fileInput.value.value = "";
   };
 
   const handleDragover = (e: DragEvent) => {
     e.preventDefault();
-    if (activeKey.value === "3") return;
+    if (activeKey.value === TAB_KEY_DOWNLOAD) return;
     if (e.dataTransfer) {
       e.dataTransfer.dropEffect = "copy";
     }
@@ -68,7 +56,7 @@ export function useModUpload(
   const handleDrop = (e: DragEvent) => {
     e.preventDefault();
     opacity.value = false;
-    if (activeKey.value === "3") return;
+    if (activeKey.value === TAB_KEY_DOWNLOAD) return;
 
     const files = e.dataTransfer?.files;
     if (!files || files.length === 0) return;
@@ -99,8 +87,10 @@ export function useModUpload(
       icon: createVNode(ExclamationCircleOutlined),
       content: `${t("TXT_CODE_CONFIRM_UPLOAD")} ${name} ?`,
       async onOk() {
-        const targetDir = activeKey.value === "1" ? "mods" : "plugins";
-        await selectedFiles(validFiles, targetDir);
+        const targetDir = activeKey.value === TAB_KEY_MODS ? "mods" : "plugins";
+        await selectedFiles(validFiles, targetDir, async () => {
+          await loadMods();
+        });
       }
     });
   };

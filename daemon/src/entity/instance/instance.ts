@@ -1,3 +1,17 @@
+/**
+ * MANDATORY TEST GATE — DO NOT MODIFY WITHOUT RE-RUNNING THE INTEGRATION TESTS.
+ *
+ * This entity is the core of the real instance/Docker integration suite in
+ * `src/routers/__test__/Instance_router.integration.test.ts` (real containers and child
+ * processes, and the interactive `test/fixtures/test.mjs` app). Any change here
+ * can break the instance lifecycle: startup, status transitions, output capture,
+ * termination and destruction.
+ *
+ * After editing this file, AI assistants and developers MUST run the
+ * `mcsmanager-test` skill and confirm the Docker + general
+ * process instance cases pass before finishing.
+ *   Skill: `.agents/skills/mcsmanager-test/SKILL.md`
+ */
 import { randomUUID } from "crypto";
 import { EventEmitter } from "events";
 import { t } from "i18next";
@@ -222,6 +236,12 @@ export default class Instance extends EventEmitter {
     configureEntityParams(this.config, cfg, "rconIp", String);
     configureEntityParams(this.config, cfg, "category", Number);
     configureEntityParams(this.config, cfg, "basePort", Number);
+    configureEntityParams(this.config, cfg, "stopTimeout", Number);
+    // configureEntityParams does no range check: non-finite/null -> 0, negative -> 0, cap at 86400, floor to integer
+    if (!Number.isFinite(this.config.stopTimeout) || this.config.stopTimeout < 0) {
+      this.config.stopTimeout = 0;
+    }
+    this.config.stopTimeout = Math.min(Math.floor(this.config.stopTimeout), 86400);
 
     if (cfg.docker) {
       configureEntityParams(this.config.docker, cfg.docker, "updateCommandImage", String);
@@ -253,6 +273,8 @@ export default class Instance extends EventEmitter {
       configureEntityParams(this.config.docker, cfg.docker, "gpuCount", Number);
       configureEntityParams(this.config.docker, cfg.docker, "gpuDeviceIds");
       configureEntityParams(this.config.docker, cfg.docker, "gpuDriver", String);
+      configureEntityParams(this.config.docker, cfg.docker, "deviceReadBps");
+      configureEntityParams(this.config.docker, cfg.docker, "deviceWriteBps");
     }
     if (cfg.pingConfig) {
       configureEntityParams(this.config.pingConfig, cfg.pingConfig, "ip", String);

@@ -14,6 +14,7 @@ import * as koa from "./service/http";
 import logger from "./service/log";
 import * as protocol from "./service/protocol";
 import * as router from "./service/router";
+import { printStartupBanner } from "./service/startup_banner";
 import InstanceSubsystem from "./service/system_instance";
 import "./service/system_visual_data";
 import uploadManager from "./service/upload_manager";
@@ -98,7 +99,7 @@ const io = new Server(httpServer, {
     origin: "*",
     methods: ["GET", "POST", "PUT", "DELETE"]
   },
-  maxHttpBufferSize: 1e8
+  maxHttpBufferSize: 1e7
 });
 
 // Initialize application instance system
@@ -143,18 +144,7 @@ process.on("unhandledRejection", (reason, p) => {
   logger.error(`Error: UnhandledRejection:`, reason, p);
 });
 
-logger.info("----------------------------");
-logger.info($t("TXT_CODE_app.started"));
-logger.info($t("TXT_CODE_app.doc"));
-let appHost = $t("TXT_CODE_app.host", { port: config.port });
-if (config.ssl) appHost = appHost.replace("http", "https");
-logger.info(appHost);
-logger.info($t("TXT_CODE_app.configPathTip", { path: "" }));
-logger.info($t("TXT_CODE_app.password", { key: config.key }));
-logger.info($t("TXT_CODE_app.passwordTip"));
-logger.info($t("TXT_CODE_app.exitTip"));
-logger.info("----------------------------");
-console.log("");
+printStartupBanner(config);
 
 let isExiting = false;
 async function listenExitSig(signal: string, isForce = true) {

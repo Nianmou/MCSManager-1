@@ -3,6 +3,7 @@ declare global {
     nickname: string;
     startCommand: string;
     stopCommand: string;
+    stopTimeout?: number;
     cwd: string;
     ie: string;
     oe: string;
@@ -110,6 +111,9 @@ declare global {
     gpuDeviceIds?: string[];
     /** GPU driver name, default "nvidia" */
     gpuDriver?: string;
+    /** Docker device read/write BPS. Format: /dev/sda:10MB */
+    deviceReadBps?: string[];
+    deviceWriteBps?: string[];
   }
 
   interface IPanelResponseProtocol {

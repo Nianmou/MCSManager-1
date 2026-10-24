@@ -13,6 +13,7 @@ import path from "path";
 import { v4 } from "uuid";
 import RedisStorage from "./app/common/storage/redis_storage";
 import Storage from "./app/common/storage/sys_storage";
+import { DataPlaneMode } from "./app/entity/setting";
 import { $t } from "./app/i18n";
 import { mountRouters } from "./app/index";
 import { preCheckMiddleware } from "./app/middleware/precheck";
@@ -22,6 +23,12 @@ import SystemRemoteService from "./app/service/remote_service";
 import SystemUser from "./app/service/user_service";
 import versionAdapter from "./app/service/version_adapter";
 import { initSystemConfig, systemConfig } from "./app/setting";
+import ProxyDataPlane from "./app/service/proxy_data_plane";
+import SocketService from "./app/service/socket_service";
+import {
+  getUnsafeIntegrationTestModeKey,
+  parseUnsafeIntegrationTestModeArg
+} from "./app/utils/integration_test_mode";
 import { checkBusinessMode, getVersion, initVersionManager } from "./app/version";
 
 function hasParams(name: string) {
@@ -35,7 +42,7 @@ function setupHttp(
   sslKeyPath: string,
   port: number,
   host?: string
-) {
+): http.Server | https.Server {
   let httpServer: http.Server | https.Server;
 
   if (ssl) {
@@ -68,6 +75,8 @@ function setupHttp(
   if (os.platform() == "win32" && hasParams("--open")) {
     open(ssl ? `https://localhost:${port}/` : `http://localhost:${port}/`);
   }
+
+  return httpServer;
 }
 
 async function processExit() {
@@ -94,6 +103,17 @@ process.stdin.on("data", (v) => {
 });
 
 async function main() {
+  // Detect the unsafe integration-test mode flag before anything else, so the
+  // permission middleware can bypass checks for requests carrying the key.
+  parseUnsafeIntegrationTestModeArg(process.argv);
+  if (getUnsafeIntegrationTestModeKey()) {
+    logger.warn(
+      "SECURITY WARNING: Unsafe integration-test mode is ENABLED. " +
+        "Requests with the matching x-request-api-key header bypass ALL permission checks. " +
+        "Never use this on a production instance."
+    );
+  }
+
   // load global configuration file
   initSystemConfig();
 
@@ -134,6 +154,21 @@ _  /  / / / /___  ____/ /_  /  / / / /_/ /_  / / / /_/ /_  /_/ //  __/  /
   app.on("error", (error) => {
     // Block all Koa framework level events
     // When Koa is attacked by a short connection flood, it is easy for error messages to swipe the screen, which may indirectly affect the operation of some applications
+  });
+
+  // Early proxy data-plane gate: must run BEFORE koa-body (which buffers
+  // multipart bodies if multipart is toggled on at all) so `ctx.req` survives
+  // for `stream.pipeline`. In direct mode (default) all requests fall through
+  // to the normal Koa pipeline — zero behavior change.
+  app.use(async (ctx, next) => {
+    if (
+      systemConfig?.dataPlane === DataPlaneMode.Proxy &&
+      ProxyDataPlane.matchRequest(ctx.method, ctx.path)
+    ) {
+      await ProxyDataPlane.handle(ctx);
+      return; // short-circuit BEFORE koa-body
+    }
+    await next();
   });
 
   app.use(preCheckMiddleware);
@@ -222,8 +257,8 @@ _  /  / / / /___  ____/ /_  /  / / / /_/ /_  / / / /_/ /_  /_/ //  __/  /
     logger.error(`ERROR (unhandledRejection):`, reason, p);
   });
 
-  if (systemConfig)
-    setupHttp(
+  if (systemConfig) {
+    const httpServer = setupHttp(
       app,
       systemConfig.ssl,
       systemConfig.sslPemPath,
@@ -231,6 +266,8 @@ _  /  / / / /___  ____/ /_  /  / / / /_/ /_  / / / /_/ /_  /_/ //  __/  /
       systemConfig.httpPort,
       systemConfig.httpIp
     );
+    if (httpServer) SocketService.setUpSocketIO(httpServer);
+  }
 }
 
 main().catch((err) => {

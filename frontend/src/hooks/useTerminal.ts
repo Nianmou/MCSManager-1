@@ -3,18 +3,22 @@ import { useCommandHistory } from "@/hooks/useCommandHistory";
 import { t } from "@/lang/i18n";
 import { setUpTerminalStreamChannel } from "@/services/apis/instance";
 import { useAppConfigStore } from "@/stores/useAppConfigStore";
+import { toCopy } from "@/tools/copy";
 import { mapDaemonAddress, parseForwardAddress } from "@/tools/protocol";
 import type { InstanceDetail } from "@/types";
 import { INSTANCE_STATUS_CODE } from "@/types/const";
 import type { DefaultEventsMap } from "@socket.io/component-emitter";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import EventEmitter from "eventemitter3";
 import type { Socket } from "socket.io-client";
 import { computed, onMounted, onUnmounted, ref, unref } from "vue";
 import { makeSocketIo } from "./useSocketIo";
+import { createTerminalHistoryReplayGate } from "./terminalHistoryReplayGate";
+import { attachTerminalTouchControls } from "./useTerminalTouch";
 
 export const TERM_COLOR = {
   TERM_RESET: "\x1B[0m",
@@ -67,6 +71,7 @@ export function useTerminal() {
   const isConnect = ref<boolean>(false);
   const socketAddress = ref("");
   let isManualDisconnect = false;
+  const historyReplayGate = createTerminalHistoryReplayGate();
 
   const isGlobalTerminal = computed(() => {
     return state.value?.config.nickname === GLOBAL_INSTANCE_NAME;
@@ -77,6 +82,7 @@ export function useTerminal() {
   });
 
   let fitAddonTask: NodeJS.Timer;
+  let removeTouchHandlers: (() => void) | undefined;
   let cachedSize = {
     w: 160,
     h: 40
@@ -183,60 +189,15 @@ export function useTerminal() {
     });
   };
 
-  const touchHandler = (event: TouchEvent) => {
-    const touches = event.changedTouches;
-    const first = touches[0];
-
-    let type = "";
-    switch (event.type) {
-      case "touchstart":
-        type = "mousedown";
-        break;
-      case "touchmove":
-        type = "mousemove";
-        break;
-      case "touchend":
-        type = "mouseup";
-        break;
-      default:
-        return;
-    }
-
-    const mouseEvent = new MouseEvent(type, {
-      bubbles: true,
-      cancelable: true,
-      view: window,
-      detail: 1,
-      screenX: first.screenX,
-      screenY: first.screenY,
-      clientX: first.clientX,
-      clientY: first.clientY,
-      ctrlKey: false,
-      altKey: false,
-      shiftKey: false,
-      metaKey: false,
-      button: 0,
-      relatedTarget: null
-    });
-
-    first.target.dispatchEvent(mouseEvent);
-    if (type === "mousedown") {
-      event.preventDefault();
-    }
-  };
-
   const initTerminalWindow = (element: HTMLElement) => {
     if (terminal.value) {
       throw new Error("Terminal already initialized, Please refresh the page!");
     }
 
-    // init touch handler
-    element.addEventListener("touchstart", touchHandler, true);
-    element.addEventListener("touchmove", touchHandler, true);
-    element.addEventListener("touchend", touchHandler, true);
-    element.addEventListener("touchcancel", touchHandler, true);
-
+    const isTouchCapable =
+      window.matchMedia("(pointer: coarse)").matches || navigator.maxTouchPoints > 0;
     const background = hasBgImage.value ? "#00000000" : "#1e1e1e";
+    const selectionBackground = "rgba(255, 255, 255, 0.3)";
     const term = new Terminal({
       convertEol: true,
       disableStdin: false,
@@ -244,13 +205,18 @@ export function useTerminal() {
       cursorBlink: true,
       fontSize: 14,
       theme: {
-        background
+        background,
+        selectionBackground
       },
       allowProposedApi: true,
       allowTransparency: true
     });
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
+
+    const unicode11Addon = new Unicode11Addon();
+    term.loadAddon(unicode11Addon);
+    term.unicode.activeVersion = "11";
 
     terminal.value = term;
 
@@ -269,23 +235,24 @@ export function useTerminal() {
     }
 
     term.open(element);
+    if (isTouchCapable) {
+      removeTouchHandlers = attachTerminalTouchControls({
+        element,
+        terminal: term,
+        canPaste: () =>
+          state.value?.config.terminalOption?.pty === true &&
+          state.value?.status !== INSTANCE_STATUS_CODE.STOPPED
+      });
+    }
 
     // If text is selected, copy it. Otherwise, fallback to default behavior.
     term.attachCustomKeyEventHandler((arg) => {
       if (arg.type === "keydown" && arg.ctrlKey && arg.code === "KeyC") {
         const selection = term.getSelection();
         if (selection) {
-          // If not in SecureContext, writeText will fail. Fallback to browser's default copy behavior, but selection won't be cleared.
-          if (window.isSecureContext) {
-            arg.preventDefault()
-          }
-
-          navigator.clipboard?.writeText(selection).then(() => {
-             term.clearSelection();
-          }).catch(err => {
-             console.error("Could not copy text: ", err);
-          });
-
+          arg.preventDefault();
+          toCopy(selection);
+          term.clearSelection();
           return false;
         }
       }
@@ -311,6 +278,13 @@ export function useTerminal() {
     }
 
     term.onData((data) => {
+      // Ignore input events fired while replaying historical backlog —
+      // these are xterm.js's own synthesized escape-sequence replies
+      // (e.g. cursor position reports), not real keystrokes.
+      if (historyReplayGate.isReplaying()) {
+        return;
+      }
+
       // If the PTY terminal is disabled, no input is sent.
       if (
         state.value?.config.terminalOption?.pty === false ||
@@ -337,16 +311,35 @@ export function useTerminal() {
     return term;
   };
 
+  function writeHistoryLog(text: string): Promise<void> {
+    return new Promise((resolve) => {
+      const term = terminal.value;
+      if (!term) {
+        resolve();
+        return;
+      }
+      historyReplayGate.begin();
+      try {
+        term.write(text, () => {
+          historyReplayGate.end();
+          resolve();
+        });
+      } catch (error) {
+        historyReplayGate.end();
+        resolve();
+      }
+    });
+  }
+
   const clearTerminal = () => {
     terminal.value?.clear();
   };
 
   events.on("stdout", (v: StdoutData) => {
-    if (state.value?.config?.terminalOption?.haveColor) {
-      terminal.value?.write(encodeConsoleColor(v.text));
-    } else {
-      terminal.value?.write(v.text);
-    }
+    const output = state.value?.config?.terminalOption?.haveColor
+      ? encodeConsoleColor(v.text)
+      : v.text;
+    terminal.value?.write(output);
   });
 
   const sendCommand = (command: string) => {
@@ -369,6 +362,10 @@ export function useTerminal() {
   onUnmounted(() => {
     clearInterval(fitAddonTask);
     clearInterval(statusQueryTask);
+    removeTouchHandlers?.();
+    removeTouchHandlers = undefined;
+    terminal.value?.dispose();
+    terminal.value = undefined;
     events.removeAllListeners();
     isManualDisconnect = true;
     socket?.disconnect();
@@ -393,7 +390,8 @@ export function useTerminal() {
     execute,
     initTerminalWindow,
     sendCommand,
-    clearTerminal
+    clearTerminal,
+    writeHistoryLog
   };
 }
 

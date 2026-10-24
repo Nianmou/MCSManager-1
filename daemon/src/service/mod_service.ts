@@ -67,9 +67,14 @@ export class ModService {
   }
 
   private async parseJarMetadata(jarPath: string): Promise<Partial<ModInfo> | null> {
-    const zip = new StreamZip.async({ file: jarPath });
+    // Open the fd ourselves: StreamZip.async never closes its fd when the archive
+    // fails to open (e.g. a zero-filled file during upload), and close() rejects too.
+    const fd = await fs.open(jarPath, "r");
+    const zip = new StreamZip.async({ fd });
+    let ready = false;
     try {
       const entries = await zip.entries();
+      ready = true;
 
       // Fabric
       if (entries["fabric.mod.json"]) {
@@ -176,7 +181,8 @@ export class ModService {
     } catch (e) {
       // Ignore parse errors
     } finally {
-      await zip.close();
+      if (ready) await zip.close().catch(() => {});
+      else await fs.close(fd).catch(() => {});
     }
     return null;
   }
@@ -185,7 +191,8 @@ export class ModService {
     instanceUuid: string,
     page: number = 1,
     pageSize: number = 50,
-    folder?: string
+    folder?: string,
+    search?: string
   ): Promise<ModListResult> {
     // Enforce max page size of 50
     if (pageSize > 50) pageSize = 50;
@@ -206,10 +213,16 @@ export class ModService {
     const result: ModInfo[] = [];
     const folders: string[] = [];
     const tasks: (() => Promise<void>)[] = [];
+    // "plugins" and "Plugins" are the same directory on case-insensitive file systems
+    const scannedDirs = new Set<string>();
 
     const scanDir = async (dirName: string, defaultType: "mod" | "plugin") => {
       const dir = fileManager.toAbsolutePath(dirName);
       if (await fs.pathExists(dir)) {
+        const dirStat = await fs.stat(dir);
+        const dirKey = `${dirStat.dev}:${dirStat.ino}`;
+        if (scannedDirs.has(dirKey)) return;
+        scannedDirs.add(dirKey);
         if (!folders.includes(dirName.toLowerCase())) {
           folders.push(dirName.toLowerCase());
         }
@@ -293,9 +306,18 @@ export class ModService {
     );
 
     // Filter by folder if specified
-    const filteredResult = folder
-      ? uniqueResult.filter((m) => m.folder === folder.toLowerCase())
-      : uniqueResult;
+    const normalizedSearch = search?.trim().toLowerCase();
+    const filteredResult = uniqueResult
+      .filter((m) => !folder || m.folder === folder.toLowerCase())
+      .filter(
+        (m) =>
+          !normalizedSearch ||
+          [m.name, m.id, m.file].some((value) =>
+            String(value || "")
+              .toLowerCase()
+              .includes(normalizedSearch)
+          )
+      );
 
     // Sort by name for consistent pagination
     filteredResult.sort((a, b) => (a.name || "").localeCompare(b.name || ""));

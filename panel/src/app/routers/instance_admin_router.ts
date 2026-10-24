@@ -3,20 +3,24 @@ import axios from "axios";
 import fs from "fs-extra";
 import path from "path";
 import { MARKET_CACHE_FILE_PATH, SAVE_DIR_PATH } from "../const";
+import { DataPlaneMode } from "../entity/setting";
 import { ROLE } from "../entity/user";
 import { $t } from "../i18n";
 import permission from "../middleware/permission";
 import validator from "../middleware/validator";
+import { updateInstanceWithAudit } from "../service/instance_config_audit";
 import { multiOperationForwarding } from "../service/instance_service";
 import { logger } from "../service/log";
-import { operationLogger } from "../service/operation_logger";
+import { getOperationLoggerOperator, operationLogger } from "../service/operation_logger";
 import { getUserUuid } from "../service/passport_service";
 import { timeUuid } from "../service/password";
 import { isHaveInstanceByUuid, isTopPermissionByUuid } from "../service/permission_service";
-import RemoteRequest from "../service/remote_command";
+import RemoteRequest, { INSTANCE_KILL_TIMEOUT } from "../service/remote_command";
 import RemoteServiceSubsystem from "../service/remote_service";
 import userSystem from "../service/user_service";
 import { systemConfig } from "../setting";
+import GatewayToken from "../service/gateway_token";
+import { browserFacingAddr } from "../service/proxy_addr";
 
 const router = new Router({ prefix: "/instance" });
 
@@ -60,8 +64,7 @@ router.post(
       operationLogger.log("instance_create", {
         daemon_id: daemonId,
         instance_id: result.instanceUuid,
-        operator_ip: ctx.ip,
-        operator_name: ctx.session?.["userName"],
+        ...getOperationLoggerOperator(ctx),
         instance_name: result.nickname
       });
     } catch (err) {
@@ -89,10 +92,25 @@ router.post(
       operationLogger.log("instance_create", {
         daemon_id: daemonId,
         instance_id: newInstanceUuid,
-        operator_ip: ctx.ip,
-        operator_name: ctx.session?.["userName"],
+        ...getOperationLoggerOperator(ctx),
         instance_name: result.nickname
       });
+      if (systemConfig?.dataPlane === DataPlaneMode.Proxy) {
+        const token = GatewayToken.issueProxyToken({
+          daemonId,
+          instanceUuid: newInstanceUuid,
+          op: "upload",
+          target: ".",
+          ttlSec: 120
+        });
+        ctx.body = {
+          instanceUuid: newInstanceUuid,
+          password: token,
+          addr: browserFacingAddr(ctx),
+          remoteMappings: []
+        };
+        return;
+      }
       // Send a cross-end file upload task to the daemon
       const addr = remoteService.config.fullAddr;
       const remoteMappings = remoteService.config.getConvertedRemoteMappings();
@@ -129,17 +147,12 @@ router.put(
       const instanceUuid = String(ctx.query.uuid);
       const config = ctx.request.body;
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
-      const result = await new RemoteRequest(remoteService).request("instance/update", {
-        instanceUuid,
-        config
-      });
-      operationLogger.log("instance_config_change", {
-        daemon_id: daemonId,
-        instance_id: instanceUuid,
-        operator_ip: ctx.ip,
-        operator_name: ctx.session?.["userName"],
-        instance_name: config.nickname
-      });
+      const result = await updateInstanceWithAudit(ctx, daemonId, instanceUuid, () =>
+        new RemoteRequest(remoteService).request("instance/update", {
+          instanceUuid,
+          config
+        })
+      );
       ctx.body = result;
     } catch (err) {
       ctx.body = err;
@@ -161,22 +174,22 @@ router.delete(
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
       if (!instanceUuids || !Array.isArray(instanceUuids))
         throw new Error("Type error, invalid uuids or daemonId");
-      const instanceIds = instanceUuids.map((uuid: string) => {
-        return { instanceUuid: uuid, daemonId };
-      });
-      userSystem.deleteUserInstances(null, instanceIds, true);
       const result = await new RemoteRequest(remoteService).request("instance/delete", {
         instanceUuids,
         deleteFile
       });
+      const instanceIds = result.instances.map((instance: { instanceUuid: string }) => ({
+        instanceUuid: instance.instanceUuid,
+        daemonId
+      }));
+      userSystem.deleteUserInstances(null, instanceIds, true);
       result.instances.forEach((e: { instanceUuid: string; nickname: string }) => {
         operationLogger.log(
           "instance_delete",
           {
             daemon_id: daemonId,
             instance_id: e.instanceUuid,
-            operator_ip: ctx.ip,
-            operator_name: ctx.session?.["userName"],
+            ...getOperationLoggerOperator(ctx),
             instance_name: e.nickname
           },
           "error"
@@ -205,8 +218,7 @@ router.post("/multi_open", permission({ level: ROLE.ADMIN }), async (ctx) => {
             operationLogger.log("instance_start", {
               daemon_id: daemonId,
               instance_id: instance.instanceUuid,
-              operator_ip: ctx.ip,
-              operator_name: ctx.session?.["userName"],
+              ...getOperationLoggerOperator(ctx),
               instance_name: instance.nickname
             });
           });
@@ -235,8 +247,7 @@ router.post("/multi_stop", permission({ level: ROLE.ADMIN }), async (ctx) => {
             operationLogger.log("instance_stop", {
               daemon_id: daemonId,
               instance_id: instance.instanceUuid,
-              operator_ip: ctx.ip,
-              operator_name: ctx.session?.["userName"],
+              ...getOperationLoggerOperator(ctx),
               instance_name: instance.nickname
             });
           });
@@ -257,14 +268,13 @@ router.post("/multi_kill", permission({ level: ROLE.ADMIN }), async (ctx) => {
     multiOperationForwarding(instances, async (daemonId: string, instanceUuids: string[]) => {
       const remoteService = RemoteServiceSubsystem.getInstance(daemonId);
       new RemoteRequest(remoteService)
-        .request("instance/kill", { instanceUuids })
+        .request("instance/kill", { instanceUuids }, INSTANCE_KILL_TIMEOUT)
         .then((e) => {
           e.instances.forEach((instance: { instanceUuid: string; nickname: string }) => {
             operationLogger.warning("instance_kill", {
               daemon_id: daemonId,
               instance_id: instance.instanceUuid,
-              operator_ip: ctx.ip,
-              operator_name: ctx.session?.["userName"],
+              ...getOperationLoggerOperator(ctx),
               instance_name: instance.nickname
             });
           });
@@ -291,8 +301,7 @@ router.post("/multi_restart", permission({ level: ROLE.ADMIN }), async (ctx) => 
             operationLogger.log("instance_restart", {
               daemon_id: daemonId,
               instance_id: instance.instanceUuid,
-              operator_ip: ctx.ip,
-              operator_name: ctx.session?.["userName"],
+              ...getOperationLoggerOperator(ctx),
               instance_name: instance.nickname
             });
           });

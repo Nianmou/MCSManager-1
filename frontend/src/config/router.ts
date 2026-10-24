@@ -1,5 +1,6 @@
 import { $t as t } from "@/lang/i18n";
 import { useAppStateStore } from "@/stores/useAppStateStore";
+import { useLayoutContainerStore } from "@/stores/useLayoutContainerStore";
 import type { LoginUserInfo } from "@/types/user";
 import InstallPage from "@/views/Install.vue";
 import LayoutContainer from "@/views/LayoutContainer.vue";
@@ -248,6 +249,16 @@ const originRouterConfig: RouterConfig[] = [
   },
 
   {
+    path: "/audit",
+    name: t("TXT_CODE_ea1600d2"),
+    component: LayoutContainer,
+    meta: {
+      permission: ROLE.ADMIN,
+      mainMenu: false
+    }
+  },
+
+  {
     path: "/settings",
     name: t("TXT_CODE_b5c7b82d"),
     component: LayoutContainer,
@@ -314,19 +325,6 @@ const originRouterConfig: RouterConfig[] = [
       permission: ROLE.GUEST,
       mainMenu: false
     }
-  },
-  {
-    path: "/shop",
-    name: t("TXT_CODE_5a408a5e"),
-    component: LayoutContainer,
-    meta: {
-      permission: ROLE.GUEST,
-      mainMenu: true,
-      condition: () => {
-        const { state: appConfig } = useAppStateStore();
-        return appConfig.settings.businessMode;
-      }
-    }
   }
 ];
 
@@ -357,6 +355,7 @@ const router = createRouter({
 
 router.beforeEach(async (to, from, next) => {
   const { state, updateUserInfo, isAdmin } = useAppStateStore();
+  const { containerState } = useLayoutContainerStore();
 
   const userPermission = state.userInfo?.permission ?? 0;
   const toPagePermission = Number(to.meta.permission ?? 0);
@@ -395,13 +394,17 @@ router.beforeEach(async (to, from, next) => {
   }
 
   if (toRoutePath === "/login" && state.userInfo?.token) {
-    return next(isAdmin.value ? "/" : "/customer");
+    if (isAdmin.value) {
+      if (containerState.isDesignMode) return next();
+      else return next("/");
+    }
+    return next("/customer");
   }
 
   if (
     toRoutePath.includes("_open_page") ||
     toRoutePath.startsWith("/sso/") ||
-    ["/shop", "/login", "/install", "/404"].includes(toRoutePath)
+    ["/login", "/install", "/404"].includes(toRoutePath)
   ) {
     return next();
   }

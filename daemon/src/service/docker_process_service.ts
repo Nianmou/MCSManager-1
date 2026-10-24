@@ -1,3 +1,16 @@
+/**
+ * MANDATORY TEST GATE — DO NOT MODIFY WITHOUT RE-RUNNING THE INTEGRATION TESTS.
+ *
+ * This service is exercised by the real instance/Docker integration suite in
+ * `src/routers/__test__/Instance_router.integration.test.ts` (real Docker containers,
+ * real attach streams). Any change here can break container startup, output
+ * capture, PTY attach, termination or destruction.
+ *
+ * After editing this file, AI assistants and developers MUST run the
+ * `mcsmanager-test` skill and confirm the Docker + instance
+ * cases pass before finishing.
+ *   Skill: `.agents/skills/mcsmanager-test/SKILL.md`
+ */
 import { t } from "i18next";
 import { commandStringToArray } from "../entity/commands/base/command_parser";
 import DockerPullCommand from "../entity/commands/docker/docker_pull";
@@ -12,10 +25,13 @@ import path from "path";
 import { EventEmitter } from "stream";
 import { IInstanceProcess } from "../entity/instance/interface";
 import { $t } from "../i18n";
+import { resolveDockerWorkspacePath } from "../tools/docker_workspace_path";
 import { AsyncTask } from "./async_task_service";
 import logger from "./log";
 import { NetworkLimitService } from "./network_limit_service";
 import InstanceSubsystem from "./system_instance";
+import { getLinuxSystemId } from "../tools/system_user";
+import { sleep } from "../utils/sleep";
 
 type PublicPortArray = {
   [key: string]: {
@@ -27,6 +43,113 @@ type PublicPortArray = {
 type ExposedPorts = {
   [key: string]: {};
 };
+
+const DOCKER_NAME_RELEASE_ATTEMPTS = 5;
+const DOCKER_NAME_RELEASE_DELAY_MS = 1000;
+
+function isDockerNameConflictError(error: any): boolean {
+  const message = String(error?.message ?? error ?? "");
+  return (
+    (error?.statusCode === 409 || error?.status === 409 || message.includes("HTTP code 409")) &&
+    message.includes("is already in use by container")
+  );
+}
+
+async function findContainerByName(
+  docker: DefaultDocker,
+  containerName: string
+): Promise<Docker.ContainerInfo | undefined> {
+  const containers = await docker.listContainers({
+    all: true,
+    filters: { name: [containerName] }
+  });
+
+  return containers.find((container) =>
+    container.Names?.some((name) => name === `/${containerName}` || name === containerName)
+  );
+}
+
+function belongsToInstance(container: Docker.ContainerInfo, instanceUuid: string): boolean {
+  return container.Labels?.["mcsmanager.instance.uuid"] === instanceUuid;
+}
+
+async function waitForContainerNameRelease(
+  docker: DefaultDocker,
+  containerName: string,
+  instanceUuid: string
+): Promise<boolean> {
+  for (let attempt = 0; attempt < DOCKER_NAME_RELEASE_ATTEMPTS; attempt++) {
+    const container = await findContainerByName(docker, containerName);
+    if (!container) return true;
+    if (!belongsToInstance(container, instanceUuid)) return false;
+    if (attempt + 1 < DOCKER_NAME_RELEASE_ATTEMPTS) {
+      await sleep(DOCKER_NAME_RELEASE_DELAY_MS);
+    }
+  }
+
+  return false;
+}
+
+async function createContainerWithNameRetry(
+  docker: DefaultDocker,
+  options: Docker.ContainerCreateOptions,
+  containerName: string,
+  instanceUuid: string
+): Promise<Docker.Container> {
+  try {
+    return await docker.createContainer(options);
+  } catch (error: any) {
+    if (!isDockerNameConflictError(error)) throw error;
+
+    const conflictingContainer = await findContainerByName(docker, containerName);
+    if (!conflictingContainer || !belongsToInstance(conflictingContainer, instanceUuid)) {
+      throw error;
+    }
+
+    if (!(await waitForContainerNameRelease(docker, containerName, instanceUuid))) {
+      throw error;
+    }
+
+    return await docker.createContainer(options);
+  }
+}
+
+function attachDockerContainer(container: Docker.Container): Promise<NodeJS.ReadWriteStream> {
+  const query = {
+    stream: true,
+    stdout: true,
+    stderr: true,
+    stdin: true
+  };
+
+  return new Promise((resolve, reject) => {
+    container.modem.dial(
+      {
+        path: `/containers/${container.id}/attach?`,
+        method: "POST",
+        isStream: true,
+        hijack: true,
+        openStdin: true,
+        file: Buffer.alloc(0),
+        statusCodes: {
+          200: true,
+          404: "no such container",
+          500: "server error"
+        },
+        options: {
+          ...query,
+          hijack: true,
+          _query: query
+        }
+      },
+      (error: Error | null, stream: NodeJS.ReadWriteStream | null) => {
+        if (error) return reject(error);
+        if (!stream) return reject(new Error("Docker attach returned no stream"));
+        resolve(stream);
+      }
+    );
+  });
+}
 
 // Error exception at startup
 export class StartupDockerProcessError extends Error {
@@ -104,10 +227,10 @@ export class SetupDockerContainer extends AsyncTask {
 
       // example: 8080:8080/tcp
       if (publicAndPrivatePort.length == 2) {
-        publicPortArray[`${publicAndPrivatePort[1]}/${protocol}`] = [
-          { HostPort: publicAndPrivatePort[0] }
-        ];
-        exposedPorts[`${publicAndPrivatePort[1]}/${protocol}`] = {};
+        const portKey = `${publicAndPrivatePort[1]}/${protocol}`;
+        publicPortArray[portKey] ||= [];
+        publicPortArray[portKey].push({ HostPort: publicAndPrivatePort[0] });
+        exposedPorts[portKey] = {};
         logOpenedPorts.push({
           host: publicAndPrivatePort[0],
           container: Number(publicAndPrivatePort[1]),
@@ -118,10 +241,13 @@ export class SetupDockerContainer extends AsyncTask {
 
       // example: 127.0.0.1:8080:8080/tcp
       if (publicAndPrivatePort.length == 3) {
-        publicPortArray[`${publicAndPrivatePort[2]}/${protocol}`] = [
-          { HostIp: publicAndPrivatePort[0], HostPort: publicAndPrivatePort[1] }
-        ];
-        exposedPorts[`${publicAndPrivatePort[2]}/${protocol}`] = {};
+        const portKey = `${publicAndPrivatePort[2]}/${protocol}`;
+        publicPortArray[portKey] ||= [];
+        publicPortArray[portKey].push({
+          HostIp: publicAndPrivatePort[0],
+          HostPort: publicAndPrivatePort[1]
+        });
+        exposedPorts[portKey] = {};
         logOpenedPorts.push({
           host: publicAndPrivatePort[0] + ":" + publicAndPrivatePort[1],
           container: Number(publicAndPrivatePort[2]),
@@ -143,6 +269,22 @@ export class SetupDockerContainer extends AsyncTask {
       const containerPath = path.normalize(paths[1]);
       extraBinds.push({ hostPath, containerPath });
     }
+
+    const parseBlkioString = (input: string) => {
+      const match = input.trim().match(/^([^:]+):(\d+)([KMG]?B?)$/i);
+      if (!match) return null;
+      const unit = (match[3] || "").charAt(0).toUpperCase();
+      const multipliers: Record<string, number> = { K: 1024, M: 1024 ** 2, G: 1024 ** 3 };
+      return { Path: match[1].trim(), Rate: parseInt(match[2]) * (multipliers[unit] || 1) };
+    };
+
+    const deviceReadBps = (dockerConfig.deviceReadBps || [])
+      .map(parseBlkioString)
+      .filter((v) => v !== null);
+
+    const deviceWriteBps = (dockerConfig.deviceWriteBps || [])
+      .map(parseBlkioString)
+      .filter((v) => v !== null);
 
     // memory limit
     let maxMemory: number | undefined = undefined;
@@ -284,9 +426,7 @@ export class SetupDockerContainer extends AsyncTask {
     let cwd = instance.absoluteCwdPath();
     const defaultInstanceDir = InstanceSubsystem.getInstanceDataDir();
     const hostRealPath = toText(process.env.MCSM_DOCKER_WORKSPACE_PATH);
-    if (hostRealPath && cwd.includes(defaultInstanceDir)) {
-      cwd = path.normalize(path.join(hostRealPath, instance.instanceUuid));
-    }
+    cwd = resolveDockerWorkspacePath(cwd, defaultInstanceDir, hostRealPath);
 
     const mounts: Docker.MountConfig = [];
     for (const v of extraBinds) {
@@ -352,10 +492,10 @@ export class SetupDockerContainer extends AsyncTask {
     let entrypoint: string | string[] | undefined = commandList.length ? commandList[0] : undefined;
     const startCmd = commandList.length > 1 ? commandList.slice(1) : undefined;
 
-    // Compatible with Docker API v29+: Entrypoint must be an array type
+    // Always send Entrypoint as an array: Docker accepts the array form on every API version (and requires it
+    // from v29), while Podman's Docker-compatible API rejects a plain string whatever version it reports.
     const { Version: dockerVersion } = await docker.version();
-    const versionNum = dockerVersion.split(".")[0];
-    if (Number(versionNum.replace("v", "")) >= 29 && entrypoint !== undefined) {
+    if (entrypoint !== undefined) {
       entrypoint = [entrypoint];
     }
 
@@ -377,7 +517,22 @@ export class SetupDockerContainer extends AsyncTask {
       }
     }
 
-    this.container = await docker.createContainer({
+    // Convert Linux host username to UID:GID format for Docker.
+    const runAs = instance.config.runAs?.trim();
+    let dockerUser: string | undefined = runAs || undefined;
+    const shouldResolveHostUser =
+      runAs && process.platform === "linux" && !runAs.includes(":") && !/^\d+$/.test(runAs);
+    if (shouldResolveHostUser) {
+      try {
+        const { uid, gid } = await getLinuxSystemId(runAs);
+        dockerUser = `${uid}:${gid}`;
+        logger.info(`Docker User: ${dockerUser} (converted from ${runAs})`);
+      } catch (error: any) {
+        logger.warn(`Failed to get UID/GID for user ${runAs}: ${error.message}`);
+      }
+    }
+
+    const containerOptions: Docker.ContainerCreateOptions = {
       Entrypoint: entrypoint,
       Cmd: startCmd,
       name: containerName,
@@ -392,7 +547,7 @@ export class SetupDockerContainer extends AsyncTask {
       StdinOnce: false,
       ExposedPorts: exposedPorts,
       Env: dockerConfig?.env || [],
-      User: instance.config.runAs || undefined,
+      User: dockerUser,
       Labels: {
         ...dockerConfig.labels
           ?.map((label) => {
@@ -403,6 +558,8 @@ export class SetupDockerContainer extends AsyncTask {
         "mcsmanager.instance.uuid": instance.instanceUuid
       },
       HostConfig: {
+        BlkioDeviceReadBps: deviceReadBps.length > 0 ? deviceReadBps : undefined,
+        BlkioDeviceWriteBps: deviceWriteBps.length > 0 ? deviceWriteBps : undefined,
         Memory: maxMemory,
         MemorySwap: memorySwap,
         MemorySwappiness: memorySwappiness,
@@ -419,10 +576,13 @@ export class SetupDockerContainer extends AsyncTask {
         Privileged: privileged,
         DeviceRequests: gpuDeviceRequests
       },
-      // Only set NetworkingConfig for non-host network modes
-      // host mode uses the host's network stack and doesn't support EndpointsConfig
+      // Only set NetworkingConfig for user-defined networks.
+      // host/none don't support EndpointsConfig, and the default "bridge" network needs none (network-scoped
+      // aliases only work on user-defined networks); Podman's Docker-compatible API cannot resolve "bridge" by name
+      // in EndpointsConfig.
       ...(dockerConfig.networkMode !== "host" &&
-        dockerConfig.networkMode !== "none" && {
+        dockerConfig.networkMode !== "none" &&
+        (dockerConfig.networkMode || "bridge") !== "bridge" && {
           NetworkingConfig: {
             EndpointsConfig: {
               [dockerConfig.networkMode || "bridge"]: {
@@ -431,7 +591,14 @@ export class SetupDockerContainer extends AsyncTask {
             }
           }
         })
-    });
+    };
+
+    this.container = await createContainerWithNameRetry(
+      docker,
+      containerOptions,
+      containerName,
+      instance.instanceUuid
+    );
 
     await this.container.start();
 
@@ -487,13 +654,7 @@ export class SetupDockerContainer extends AsyncTask {
     const container = this.container;
     if (!container) throw new Error("Attach Failed, Container is Null!");
     try {
-      const stream = await container.attach({
-        stream: true,
-        stdout: true,
-        stderr: true,
-        stdin: true,
-        hijack: true
-      });
+      const stream = await attachDockerContainer(container);
       stream.on("data", (text: any) => instance.print(iconv.decode(text, outputCode)));
       stream.on("error", (text: any) => instance.print(iconv.decode(text, outputCode)));
     } catch (error: any) {
@@ -512,6 +673,12 @@ export class DockerProcessAdapter extends EventEmitter implements IInstanceProce
   pid?: number | string;
 
   private stream?: NodeJS.ReadWriteStream;
+  private streamGeneration = 0;
+  private reconnectTimer?: NodeJS.Timeout;
+  private reconnecting = false;
+  private stopping = false;
+  private exitEmitted = false;
+  private waitActive = false;
   public container?: Docker.Container;
 
   constructor(public readonly containerWrapper: SetupDockerContainer) {
@@ -534,16 +701,8 @@ export class DockerProcessAdapter extends EventEmitter implements IInstanceProce
       }
 
       this.pid = this.container.id;
-      this.stream = await this.container.attach({
-        stream: true,
-        stdout: true,
-        stderr: true,
-        stdin: true,
-        hijack: true
-      });
-      this.stream.on("data", (data) => this.emit("data", data));
-      this.stream.on("error", (data) => this.emit("data", data));
-      this.wait();
+      await this.attachStream();
+      this.watchExit();
     } catch (error: any) {
       this.kill();
       throw error;
@@ -551,24 +710,135 @@ export class DockerProcessAdapter extends EventEmitter implements IInstanceProce
   }
 
   public write(data?: string) {
-    if (this.stream && data) this.stream.write(data);
+    if (!data) return;
+    if (!this.stream) {
+      this.scheduleReconnect();
+      return;
+    }
+    try {
+      this.stream.write(data);
+    } catch (error) {
+      this.handleStreamLost(this.streamGeneration);
+    }
   }
 
   public async kill(s?: string) {
+    this.stopping = true;
+    this.clearReconnectTimer();
     await this.container?.kill();
     return true;
   }
 
   public async destroy() {
+    this.stopping = true;
+    this.clearReconnectTimer();
+    this.closeStream();
     try {
       await this.container?.remove();
     } catch (error: any) {}
   }
 
-  private wait() {
-    this.container?.wait(async (v) => {
-      await this.destroy();
-      this.emit("exit", v);
+  private async attachStream() {
+    if (!this.container || this.stream || this.stopping || this.exitEmitted) return;
+    const stream = await attachDockerContainer(this.container);
+    if (this.stopping || this.exitEmitted) {
+      (stream as any).destroy?.();
+      return;
+    }
+
+    const generation = ++this.streamGeneration;
+    this.stream = stream;
+    stream.on("data", (data) => {
+      if (generation === this.streamGeneration) this.emit("data", data);
     });
+    stream.once("error", () => this.handleStreamLost(generation));
+    stream.once("end", () => this.handleStreamLost(generation));
+    stream.once("close", () => this.handleStreamLost(generation));
+  }
+
+  private handleStreamLost(generation: number) {
+    if (
+      generation !== this.streamGeneration ||
+      this.stopping ||
+      this.exitEmitted
+    )
+      return;
+    this.stream = undefined;
+    this.waitActive = false;
+    this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(delay = 2000) {
+    if (this.stopping || this.exitEmitted || this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.reconnect();
+    }, delay);
+  }
+
+  private clearReconnectTimer() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+  }
+
+  private async reconnect() {
+    if (this.reconnecting || this.stopping || this.exitEmitted) return;
+    this.reconnecting = true;
+    try {
+      await this.attachStream();
+      this.watchExit();
+    } catch (error) {
+      this.scheduleReconnect(3000);
+    } finally {
+      this.reconnecting = false;
+    }
+  }
+
+  private watchExit() {
+    if (!this.container || this.waitActive || this.exitEmitted) return;
+    this.waitActive = true;
+    this.container.wait((error, result) => {
+      this.waitActive = false;
+      if (this.exitEmitted) return;
+      if (error) {
+        void this.handleWaitError();
+        return;
+      }
+      void this.handleContainerExit(result?.StatusCode ?? 0);
+    });
+  }
+
+  private async handleWaitError() {
+    if (!this.container || this.exitEmitted) return;
+    try {
+      const info = await this.container.inspect();
+      if (info.State?.Running) {
+        if (!this.stopping) this.scheduleReconnect();
+        else setTimeout(() => this.watchExit(), 3000);
+      } else {
+        await this.handleContainerExit(info.State?.ExitCode ?? 0);
+      }
+    } catch (error) {
+      if (!this.stopping) this.scheduleReconnect(3000);
+      else await this.handleContainerExit(0);
+    }
+  }
+
+  private async handleContainerExit(code: number) {
+    if (this.exitEmitted) return;
+    this.exitEmitted = true;
+    this.clearReconnectTimer();
+    this.closeStream();
+    try {
+      await this.container?.remove();
+    } catch (error) {}
+    this.emit("exit", code);
+  }
+
+  private closeStream() {
+    const stream = this.stream;
+    this.stream = undefined;
+    this.streamGeneration++;
+    (stream as any)?.destroy?.();
   }
 }

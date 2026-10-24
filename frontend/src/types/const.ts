@@ -149,7 +149,9 @@ export const defaultDockerConfig: IGlobalInstanceDockerConfig = {
   gpuEnabled: false,
   gpuCount: -1,
   gpuDeviceIds: [],
-  gpuDriver: "nvidia"
+  gpuDriver: "nvidia",
+  deviceReadBps: [],
+  deviceWriteBps: []
 };
 
 export const defaultInstanceJavaConfig: IInstanceJavaConfig = {
@@ -160,6 +162,7 @@ export const defaultInstanceInfo: IGlobalInstanceConfig = {
   nickname: "",
   startCommand: "",
   stopCommand: "^c",
+  stopTimeout: 0,
   cwd: "",
   ie: "UTF-8",
   oe: "UTF-8",
@@ -189,7 +192,7 @@ export const defaultInstanceInfo: IGlobalInstanceConfig = {
   // Old fields
   terminalOption: {
     haveColor: true,
-    pty: false,
+    pty: true,
     ptyWindowCol: 164,
     ptyWindowRow: 40
   },

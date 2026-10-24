@@ -118,7 +118,7 @@ const handleNameClick = () => {
       <FrownOutlined v-else-if="node" style="margin-right: 8px" />
       <a v-if="!node" @click.prevent="handleNameClick()">
         <a-typography-text
-          :style="{ fontWeight: 'normal', maxWidth: '200px' }"
+          :style="{ fontWeight: 'normal', maxWidth: '190px' }"
           :ellipsis="{ tooltip: record.name }"
           :content="record.name"
         />

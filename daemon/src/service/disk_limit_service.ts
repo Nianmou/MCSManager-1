@@ -1,11 +1,13 @@
 import { exec } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import { promisify } from "util";
 import Instance from "../entity/instance/instance";
 import { $t } from "../i18n";
 import { checkFilePath } from "../tools/filepath";
 import { ConsumerQueue } from "../utils/queue";
 import { sleep } from "../utils/sleep";
+import logger from "./log";
 
 const execPromise = promisify(exec);
 
@@ -29,8 +31,13 @@ class DiskLimitService {
   }
 
   async checkInstanceDiskSize(instance: Instance) {
-    const workspace = instance.absoluteCwdPath();
     const maxSpace = Number(instance.config.docker.maxSpace);
+    // Defensive guard: maxSpace <= 0 means the quota feature is disabled
+    // (default 0 / unset / negative). The 45s lifecycle task already filters
+    // these out, but this keeps the service contract self-contained so other
+    // callers cannot enqueue useless `du` jobs.
+    if (maxSpace <= 0) return;
+    const workspace = instance.absoluteCwdPath();
     this.queue.push({
       key: instance.instanceUuid,
       item: {
@@ -50,7 +57,14 @@ class DiskLimitService {
       for (let i = 0; i < this.concurrent; i++) {
         const item = this.queue.pop();
         if (item) {
-          promises.push(this.checkDiskNow(item));
+          promises.push(
+            this.checkDiskNow(item).catch((error) => {
+              logger.warn(
+                `Disk usage check failed for instance ${item.instance.instanceUuid}`,
+                error
+              );
+            })
+          );
         }
       }
       await Promise.all(promises);
@@ -89,6 +103,11 @@ class DiskLimitService {
 
     // global instance is not limited by disk space
     if (instance.isGlobalInstance() || workspace === "/" || workspace === "\\") {
+      return this.getCheckDefaultValue(instance, maxSpace);
+    }
+
+    // Disk limit is not supported on Windows
+    if (os.platform() === "win32") {
       return this.getCheckDefaultValue(instance, maxSpace);
     }
 

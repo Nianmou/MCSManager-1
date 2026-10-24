@@ -1,6 +1,7 @@
 import { t } from "@/lang/i18n";
 import { getRandomId } from "@/tools/randId";
 import type { LayoutCard } from "@/types";
+import AuditLog from "@/widgets/AuditLog.vue";
 import DefaultCard from "@/widgets/DefaultCard.vue";
 import EmptyCard from "@/widgets/EmptyCard.vue";
 import ImageManager from "@/widgets/imageManager/index.vue";
@@ -38,7 +39,6 @@ import RequestChart from "@/widgets/RequestChart.vue";
 import Settings from "@/widgets/Settings.vue";
 import McPreset from "@/widgets/setupApp/McPreset.vue";
 import QuickStartFlow from "@/widgets/setupApp/QuickStartFlow.vue";
-import ShelvesCard from "@/widgets/ShelvesCard.vue";
 import StatusBlock from "@/widgets/StatusBlock.vue";
 import TitleCard from "@/widgets/TitleCard.vue";
 import UserAccessSettings from "@/widgets/user/AccessSettings.vue";
@@ -92,8 +92,8 @@ export const LAYOUT_CARD_TYPES: { [key: string]: any } = {
   Carousel,
   PluginCard,
   MusicCard,
-  ShelvesCard,
   OperationLogCard,
+  AuditLog,
   Market,
   MarketEditor
 };
@@ -437,6 +437,17 @@ export function getLayoutCardPool() {
     {
       id: getRandomId(),
       permission: ROLE.ADMIN,
+      type: "AuditLog",
+      title: t("TXT_CODE_ea1600d2"),
+      meta: {},
+      width: 12,
+      description: t("TXT_CODE_fe933494"),
+      height: LayoutCardHeight.AUTO,
+      category: NEW_CARD_TYPE.DATA
+    },
+    {
+      id: getRandomId(),
+      permission: ROLE.ADMIN,
       type: "DataOverview",
       title: t("TXT_CODE_721157a3"),
       meta: {},
@@ -516,17 +527,6 @@ export function getLayoutCardPool() {
       width: 4,
       description: t("TXT_CODE_cb84b22"),
       height: LayoutCardHeight.SMALL,
-      category: NEW_CARD_TYPE.COMMON
-    },
-    {
-      id: getRandomId(),
-      permission: ROLE.GUEST,
-      meta: {},
-      type: "ShelvesCard",
-      title: t("TXT_CODE_b99cae18"),
-      width: 8,
-      description: t("TXT_CODE_163e2d0a"),
-      height: LayoutCardHeight.MEDIUM,
       category: NEW_CARD_TYPE.COMMON
     },
     {

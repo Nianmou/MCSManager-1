@@ -1,24 +1,31 @@
 <script setup lang="ts">
-import { getProPanelUrl } from "@/components/IframeBox/config";
-import IframeBox from "@/components/IframeBox/index.vue";
 import LeftMenusPanel from "@/components/LeftMenusPanel.vue";
 import Loading from "@/components/Loading.vue";
 import { useUploadFileDialog } from "@/components/fc";
 import { router } from "@/config/router";
-import { SUPPORTED_LANGS, isCN, t } from "@/lang/i18n";
-import { setSettingInfo, settingInfo } from "@/services/apis";
+import { SUPPORTED_LANGS, getCurrentLang, isCN, t } from "@/lang/i18n";
+import {
+  getPanelUpgradeInfo,
+  setSettingInfo,
+  settingInfo,
+  upgradePanel,
+  type IUpgradeInfo
+} from "@/services/apis";
 import { useAppConfigStore } from "@/stores/useAppConfigStore";
 import { useLayoutConfigStore } from "@/stores/useLayoutConfig";
 import { useLayoutContainerStore } from "@/stores/useLayoutContainerStore";
 import { arrayFilter } from "@/tools/array";
+import { pickLocalizedNotes } from "@/tools/localizedNotes";
 import { reportErrorMsg } from "@/tools/validator";
-import type { LayoutCard, Settings } from "@/types";
+import { DataPlaneMode, type LayoutCard, type Settings } from "@/types";
 import {
   ApiOutlined,
   BankOutlined,
   BookOutlined,
   BugOutlined,
+  CloudUploadOutlined,
   EditOutlined,
+  FileProtectOutlined,
   GithubOutlined,
   LockOutlined,
   MessageOutlined,
@@ -26,7 +33,8 @@ import {
   PicLeftOutlined,
   PlusOutlined,
   ProjectOutlined,
-  QuestionCircleOutlined
+  QuestionCircleOutlined,
+  ReloadOutlined
 } from "@ant-design/icons-vue";
 import { Modal, message, notification } from "ant-design-vue";
 import { computed, onMounted, onUnmounted, ref } from "vue";
@@ -102,18 +110,11 @@ const menus = arrayFilter([
     key: "baseInfo",
     icon: ProjectOutlined
   },
-  // {
-  //   title: t("TXT_CODE_574ed474"),
-  //   key: "pro",
-  //   icon: SketchOutlined,
-  //   condition: () => isCN()
-  // },
-  // {
-  //   title: t("TXT_CODE_caf8ebb7"),
-  //   key: "redeem",
-  //   icon: KeyOutlined,
-  //   condition: () => isCN()
-  // },
+  {
+    title: t("TXT_CODE_AUTOUPDATE_TAB_TITLE"),
+    key: "autoUpdate",
+    icon: CloudUploadOutlined
+  },
   {
     title: t("TXT_CODE_1c18acc0"),
     key: "ui",
@@ -125,10 +126,16 @@ const menus = arrayFilter([
     icon: LockOutlined
   },
   {
+    title: t("TXT_CODE_ea1600d2"),
+    key: "audit",
+    icon: FileProtectOutlined
+  },
+  {
     title: t("TXT_CODE_SSO_TAB_TITLE"),
     key: "sso",
     icon: ApiOutlined
   },
+
   {
     title: t("TXT_CODE_46cb40d5"),
     key: "sponsor",
@@ -157,6 +164,32 @@ const allYesNo = [
   {
     label: t("TXT_CODE_718c9310"),
     value: false
+  }
+];
+
+const apiKeyAccessOptions = [
+  {
+    label: t("TXT_CODE_52c8a730"),
+    value: true
+  },
+  {
+    label: t("TXT_CODE_675e5397"),
+    value: "ONLY_ADMIN"
+  },
+  {
+    label: t("TXT_CODE_718c9310"),
+    value: false
+  }
+];
+
+const dataPlaneOptions = [
+  {
+    label: t("TXT_CODE_settings_dataPlane_direct"),
+    value: DataPlaneMode.Direct
+  },
+  {
+    label: t("TXT_CODE_settings_dataPlane_proxy"),
+    value: DataPlaneMode.Proxy
   }
 ];
 
@@ -348,7 +381,7 @@ const doSubmitSso = async () => {
 const submitSso = async () => {
   const fd = formData.value as any;
   if (fd?.ssoEnabled) {
-    if (!fd.ssoClientId?.trim() || !fd.ssoClientSecret?.trim()) {
+    if (!fd.ssoClientId?.trim()) {
       return message.error(t("TXT_CODE_SSO_ENABLE_REQUIRES_CONFIG"));
     }
     if (fd.ssoType === "oauth2") {
@@ -393,6 +426,55 @@ const toTemplate = {
     })
 };
 
+// ---- Panel self-update (web) ----
+const panelUpgradeInfo = ref<IUpgradeInfo>();
+const panelUpgradeLoading = ref(false);
+
+// Release notes of the online version, matched against the current panel
+// language (falls back to English when that locale is missing).
+const panelUpgradeNotes = computed(() =>
+  pickLocalizedNotes(panelUpgradeInfo.value?.onlineNotes, getCurrentLang())
+);
+
+const refreshPanelUpgradeInfo = async () => {
+  if (panelUpgradeLoading.value) return;
+  panelUpgradeLoading.value = true;
+  try {
+    const { execute } = getPanelUpgradeInfo();
+    panelUpgradeInfo.value = (await execute({})).value;
+  } catch (error: any) {
+    // silent: keep last known state
+  } finally {
+    panelUpgradeLoading.value = false;
+  }
+};
+
+const onUpdateWeb = () => {
+  Modal.confirm({
+    title: t("TXT_CODE_AUTOUPDATE_WEB_BTN"),
+    content: t("TXT_CODE_AUTOUPDATE_WEB_CONFIRM"),
+    okText: t("TXT_CODE_AUTOUPDATE_BTN_OK"),
+    cancelText: t("TXT_CODE_AUTOUPDATE_BTN_CANCEL"),
+    onOk: async () => {
+      try {
+        const { execute } = upgradePanel();
+        const res = await execute({});
+        if (!res.value?.started) {
+          message.info(res.value?.message || t("TXT_CODE_AUTOUPDATE_ALREADY_LATEST"));
+          return;
+        }
+        // Update files are applied on disk; the panel is NOT restarted
+        // automatically. Ask the operator to restart it manually.
+        Modal.success({
+          content: t("TXT_CODE_AUTOUPDATE_WEB_SUCCESS", { v: res.value.onlineVersion })
+        });
+      } catch (error: any) {
+        reportErrorMsg(error?.message ? error.message : t("TXT_CODE_AUTOUPDATE_WEB_FAILED"));
+      }
+    }
+  });
+};
+
 onMounted(async () => {
   const res = await execute();
   const cfg = await getSettingsConfig();
@@ -423,6 +505,8 @@ onMounted(async () => {
       leftMenusPanelRef.value?.setActiveKey("pro");
     }
   }, 100);
+
+  refreshPanelUpgradeInfo();
 });
 
 onUnmounted(() => {
@@ -722,6 +806,29 @@ onUnmounted(() => {
 
                   <a-form-item>
                     <a-typography-title :level="5">
+                      {{ t("TXT_CODE_95192169") }}
+                    </a-typography-title>
+                    <a-typography-paragraph>
+                      <a-typography-text type="secondary">
+                        {{ t("TXT_CODE_820260c5") }}
+                      </a-typography-text>
+                    </a-typography-paragraph>
+                    <a-select
+                      v-model:value.prop="(formData as any).enableApiKey"
+                      style="max-width: 320px"
+                    >
+                      <a-select-option
+                        v-for="item in apiKeyAccessOptions"
+                        :key="item.value"
+                        :value="item.value"
+                      >
+                        {{ item.label }}
+                      </a-select-option>
+                    </a-select>
+                  </a-form-item>
+
+                  <a-form-item>
+                    <a-typography-title :level="5">
                       {{ t("TXT_CODE_a583cae4") }}
                     </a-typography-title>
                     <a-typography-paragraph>
@@ -825,10 +932,7 @@ onUnmounted(() => {
                       </a-typography-text>
                     </a-typography-paragraph>
 
-                    <a-select
-                      v-model:value.prop="(formData as any).gzip"
-                      style="max-width: 320px"
-                    >
+                    <a-select v-model:value.prop="(formData as any).gzip" style="max-width: 320px">
                       <a-select-option
                         v-for="item in allYesNo"
                         :key="item.value"
@@ -926,6 +1030,158 @@ onUnmounted(() => {
                         {{ item.label }}
                       </a-select-option>
                     </a-select>
+                  </a-form-item>
+
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_settings_dataPlane") }}
+                    </a-typography-title>
+                    <a-typography-paragraph>
+                      <a-typography-text type="secondary">
+                        {{ t("TXT_CODE_settings_dataPlane_hint") }}
+                      </a-typography-text>
+                    </a-typography-paragraph>
+
+                    <a-select
+                      v-model:value="(formData as any).dataPlane"
+                      style="max-width: 320px"
+                    >
+                      <a-select-option
+                        v-for="item in dataPlaneOptions"
+                        :key="item.value"
+                        :value="item.value"
+                      >
+                        {{ item.label }}
+                      </a-select-option>
+                    </a-select>
+                  </a-form-item>
+
+                  <div class="button">
+                    <a-button type="primary" :loading="submitIsLoading" @click="submit(false)">
+                      {{ t("TXT_CODE_abfe9512") }}
+                    </a-button>
+                  </div>
+                </a-form>
+              </div>
+            </div>
+          </template>
+
+          <template #audit>
+            <div class="content-box" :style="{ maxHeight: card.height }">
+              <a-typography-title :level="4" class="mb-24">
+                {{ t("TXT_CODE_ea1600d2") }}
+              </a-typography-title>
+              <div style="text-align: left">
+                <a-form :model="formData" layout="vertical">
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_3c7c9297") }}
+                    </a-typography-title>
+                    <a-typography-paragraph>
+                      <a-typography-text type="secondary">
+                        {{ t("TXT_CODE_16a4e557") }}
+                      </a-typography-text>
+                    </a-typography-paragraph>
+                    <a-select
+                      v-model:value.prop="(formData as any).operationLogEnabled"
+                      style="max-width: 320px"
+                    >
+                      <a-select-option
+                        v-for="item in allYesNo"
+                        :key="item.value"
+                        :value="item.value"
+                      >
+                        {{ item.label }}
+                      </a-select-option>
+                    </a-select>
+                  </a-form-item>
+
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_186e1ce1") }}
+                    </a-typography-title>
+                    <a-typography-paragraph>
+                      <a-typography-text type="secondary">
+                        {{ t("TXT_CODE_3effdfb0") }}
+                      </a-typography-text>
+                    </a-typography-paragraph>
+                    <div class="audit-scope-list">
+                      <div class="audit-scope-item">
+                        <span class="mr-8">{{ t("TXT_CODE_dbbaf16e") }}</span>
+                        <a-checkbox v-model:checked="(formData as any).operationLogRecordLogin" />
+                      </div>
+                      <div class="audit-scope-item">
+                        <span class="mr-8">{{ t("TXT_CODE_b68c8da6") }}</span>
+                        <a-checkbox
+                          v-model:checked="(formData as any).operationLogRecordInstance"
+                        />
+                      </div>
+                      <div class="audit-scope-item">
+                        <span class="mr-8">{{ t("TXT_CODE_95495db") }}</span>
+                        <a-checkbox v-model:checked="(formData as any).operationLogRecordFile" />
+                      </div>
+                      <div class="audit-scope-item">
+                        <span class="mr-8">{{ t("TXT_CODE_500fed5c") }}</span>
+                        <a-checkbox v-model:checked="(formData as any).operationLogRecordUser" />
+                      </div>
+                      <div class="audit-scope-item">
+                        <span class="mr-8">{{ t("TXT_CODE_36b3a6b") }}</span>
+                        <a-checkbox v-model:checked="(formData as any).operationLogRecordSystem" />
+                      </div>
+                    </div>
+                  </a-form-item>
+
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_68f99fdf") }}
+                    </a-typography-title>
+                    <a-typography-paragraph>
+                      <a-typography-text type="secondary">
+                        {{ t("TXT_CODE_507be396") }}
+                      </a-typography-text>
+                    </a-typography-paragraph>
+                    <a-input-number
+                      v-model:value="formData.operationLogMaxLinesPerFile"
+                      style="max-width: 320px; width: 100%"
+                      :min="10"
+                      :max="1000"
+                      :step="10"
+                    />
+                  </a-form-item>
+
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_dda5f944") }}
+                    </a-typography-title>
+                    <a-typography-paragraph>
+                      <a-typography-text type="secondary">
+                        {{ t("TXT_CODE_8d88f625") }}
+                      </a-typography-text>
+                    </a-typography-paragraph>
+                    <a-input-number
+                      v-model:value="formData.operationLogKeepDays"
+                      style="max-width: 320px; width: 100%"
+                      :min="0"
+                      :max="3650"
+                    />
+                  </a-form-item>
+
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_706b201e") }}
+                    </a-typography-title>
+                    <a-typography-paragraph>
+                      <a-typography-text type="secondary">
+                        {{ t("TXT_CODE_7ef4ecf4") }}
+                      </a-typography-text>
+                    </a-typography-paragraph>
+                    <a-input-number
+                      v-model:value="formData.operationLogMaxTotalLines"
+                      style="max-width: 320px; width: 100%"
+                      :min="0"
+                      :max="1000000"
+                      :step="1000"
+                    />
                   </a-form-item>
 
                   <div class="button">
@@ -1098,8 +1354,29 @@ onUnmounted(() => {
                       <a-input-password
                         v-model:value="(formData as any).ssoClientSecret"
                         style="max-width: 480px"
-                        :placeholder="t('TXT_CODE_4ea93630')"
+                        :placeholder="t('TXT_CODE_4d6e44c')"
                       />
+                    </a-form-item>
+
+                    <a-form-item>
+                      <a-typography-title :level="5">
+                        {{ t("TXT_CODE_b25b5335") }}
+                      </a-typography-title>
+                      <a-typography-paragraph type="secondary">
+                        {{ t("TXT_CODE_9a26aa70") }}
+                      </a-typography-paragraph>
+                      <a-select
+                        v-model:value="(formData as any).ssoTokenAuthMethod"
+                        style="max-width: 320px"
+                      >
+                        <a-select-option value="auto">{{ t("TXT_CODE_dc8de4ff") }}</a-select-option>
+                        <a-select-option value="client_secret_basic">
+                          client_secret_basic
+                        </a-select-option>
+                        <a-select-option value="client_secret_post">
+                          client_secret_post
+                        </a-select-option>
+                      </a-select>
                     </a-form-item>
 
                     <a-form-item>
@@ -1113,6 +1390,20 @@ onUnmounted(() => {
                         v-model:value="(formData as any).ssoCallbackUrl"
                         style="max-width: 480px"
                         placeholder="https://your-panel.com/api/auth/sso/callback"
+                      />
+                    </a-form-item>
+
+                    <a-form-item>
+                      <a-typography-title :level="5">
+                        {{ t("TXT_CODE_SSO_ALLOWED_REDIRECT_HOSTS") }}
+                      </a-typography-title>
+                      <a-typography-paragraph type="secondary">
+                        {{ t("TXT_CODE_SSO_ALLOWED_REDIRECT_HOSTS_DESC") }}
+                      </a-typography-paragraph>
+                      <a-input
+                        v-model:value="(formData as any).ssoAllowedRedirectHosts"
+                        style="max-width: 480px"
+                        placeholder="panel.example.com,panel2.example.com:8443"
                       />
                     </a-form-item>
 
@@ -1169,14 +1460,101 @@ onUnmounted(() => {
             </div>
           </template>
 
-          <template #pro>
-            <IframeBox :src="getProPanelUrl('/status')" :height="card.height" />
-          </template>
+          <template #autoUpdate>
+            <div class="content-box" :style="{ maxHeight: card.height }">
+              <a-typography-title :level="4" class="mb-24">
+                {{ t("TXT_CODE_AUTOUPDATE_TAB_TITLE") }}
+              </a-typography-title>
+              <div style="text-align: left">
+                <a-form :model="formData" layout="vertical">
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_TITLE") }}
+                    </a-typography-title>
+                    <a-typography-paragraph type="secondary">
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_TITLE_DESC") }}
+                    </a-typography-paragraph>
+                    <div class="flex" style="gap: 12px; flex-wrap: wrap">
+                      <template v-if="panelUpgradeInfo">
+                        <a-typography-text strong>
+                          v{{ panelUpgradeInfo.currentVersion }}
+                        </a-typography-text>
+                        <a-tag v-if="!panelUpgradeInfo.configured" color="default">
+                          {{ t("TXT_CODE_AUTOUPDATE_WEB_NOT_CONFIGURED") }}
+                        </a-tag>
+                        <template v-else>
+                          <a-tag v-if="panelUpgradeInfo.updateAvailable" color="processing">
+                            {{
+                              t("TXT_CODE_AUTOUPDATE_WEB_LATEST", {
+                                v: panelUpgradeInfo.onlineVersion
+                              })
+                            }}
+                          </a-tag>
+                          <a-tag v-else color="success">
+                            {{ t("TXT_CODE_AUTOUPDATE_UP_TO_DATE") }}
+                          </a-tag>
+                        </template>
+                      </template>
+                      <a-button
+                        size="small"
+                        :loading="panelUpgradeLoading"
+                        @click="refreshPanelUpgradeInfo"
+                      >
+                        <template #icon><ReloadOutlined /></template>
+                        {{ t("TXT_CODE_AUTOUPDATE_BTN_REFRESH") }}
+                      </a-button>
+                    </div>
+                    <div
+                      v-if="panelUpgradeInfo?.updateAvailable && panelUpgradeNotes"
+                      class="update-notes-box"
+                    >
+                      <div class="update-notes-title">
+                        {{ t("TXT_CODE_AUTOUPDATE_WEB_NOTES") }}
+                      </div>
+                      <div class="update-notes-body">{{ panelUpgradeNotes }}</div>
+                    </div>
+                  </a-form-item>
+                  <a-form-item>
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_BTN") }}
+                    </a-typography-title>
+                    <a-typography-paragraph type="secondary">
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_ACTION_DESC") }}
+                    </a-typography-paragraph>
+                    <a-button
+                      type="primary"
+                      danger
+                      :disabled="
+                        !panelUpgradeInfo?.configured || !panelUpgradeInfo?.updateAvailable
+                      "
+                      @click="onUpdateWeb"
+                    >
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_BTN") }}
+                    </a-button>
+                  </a-form-item>
+                  <a-form-item v-if="formData">
+                    <a-typography-title :level="5">
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_SOURCE") }}
+                    </a-typography-title>
+                    <a-typography-paragraph type="secondary">
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_SOURCE_DESC") }}
+                    </a-typography-paragraph>
+                    <a-input
+                      v-model:value="formData.updateSourceUrl"
+                      style="max-width: 480px"
+                      :placeholder="t('TXT_CODE_AUTOUPDATE_WEB_SOURCE_PH')"
+                    />
+                  </a-form-item>
 
-          <template #redeem>
-            <IframeBox :src="getProPanelUrl('/')" :height="card.height" />
+                  <div class="button mb-24">
+                    <a-button type="primary" :loading="submitIsLoading" @click="submit(false)">
+                      {{ t("TXT_CODE_AUTOUPDATE_WEB_SAVE") }}
+                    </a-button>
+                  </div>
+                </a-form>
+              </div>
+            </div>
           </template>
-
           <template #about>
             <div class="content-box" :style="{ maxHeight: card.height }">
               <a-typography-title :level="4" class="mb-24">
@@ -1255,5 +1633,35 @@ div {
 .content-box {
   padding: 16px;
   overflow-y: auto;
+}
+
+.audit-scope-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+
+  .audit-scope-item {
+    display: flex;
+    align-items: center;
+  }
+}
+
+.update-notes-box {
+  margin-top: 12px;
+  max-width: 640px;
+  padding: 12px;
+  border-radius: 6px;
+  background: var(--color-gray-2);
+  border: 1px solid var(--color-gray-4);
+}
+
+.update-notes-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.update-notes-body {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 </style>

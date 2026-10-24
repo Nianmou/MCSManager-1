@@ -1,6 +1,6 @@
 <div align="center">
   <a href="https://mcsmanager.com/" target="_blank">
-    <img src="https://public-link.oss-cn-shenzhen.aliyuncs.com/mcsm_picture/logo.png" alt="MCSManagerLogo.png" width="510px" />    
+    <img src="./frontend/src/assets/logo.png" alt="MCSManagerLogo.png" width="510px" />    
   </a>
 
   <br />
@@ -8,7 +8,7 @@
 
 [![--](https://img.shields.io/badge/Support-Windows/Linux-green.svg)](https://github.com/MCSManager)
 [![Status](https://img.shields.io/badge/npm-v8.9.14-blue.svg)](https://www.npmjs.com/)
-[![Status](https://img.shields.io/badge/node-v16.20.2-blue.svg)](https://nodejs.org/en/download/)
+[![Status](https://img.shields.io/badge/node-v22.23.4-blue.svg)](https://nodejs.org/en/download/)
 [![Status](https://img.shields.io/badge/License-Apache%202.0-red.svg)](https://github.com/MCSManager)
 
 <p align="center">
@@ -30,9 +30,16 @@
 
 **MCSManager 面板**（简称：MCSM 面板），是一个快速部署，支持分布式架构，支持多用户，简单易用和现代化的 Minecraft、Steam 和其他游戏服务器 Web 管理面板。
 
-MCSManager 在 `Minecraft` 和 `Steam` 游戏社区内中已有一定的流行程度，它可以帮助你集中管理多个物理服务器，实现在任何主机上创建游戏服务器，并且提供安全可靠的多用户权限系统，可以很轻松的帮助你管理多个服务器，一直在为 `Minecraft`，`Terraria` 和 `Steam` 游戏服务器的管理员，运维人员和个人开发者提供健康的软件支持。
+MCSManager 在 `Minecraft` 和 `Steam` 游戏社区内中已有一定的流行程度，它可以帮助你集中管理多个物理服务器，实现在任何主机上创建游戏服务器，并且提供安全可靠的多用户权限系统，可以很轻松的帮助你管理多个服务器，一直在为 `Minecraft`，`Terraria` 和 `Steam` 游戏服务器的管理员，运维人员和个人开发者提
+供健康的软件支持。
 
-MCSM 同样也考虑了**商业应用**，例如由 **IDC 服务提供商**进行的私有服务器托管和销售。多家中小型企业已经将此面板用作**服务器管理**和**销售平台**的结合。此外，它支持**多语言环境**，使其可供不同国家和地区的用户访问。
+**核心功能：**
+
+1. 管理员能基于各类模板（或 Docker 镜像）创建 Minecraft、Steam 等游戏服务器（或其他任何程序），服务器支持运行在 Docker 容器或直接以进程的方式运行，并且在 Web 网页上访问其终端。
+
+2. 管理员可以创建普通用户，同时将实例分配给普通用户，控制面板通过Docker容器和文件权限检查等各种手段，实现普通用户只能访问已分配的实例，尽可能的确保宿主机的安全。
+
+MCSM 考虑了**商业应用**方面的需求，例如由 **IDC 服务提供商**进行的私有服务器托管和销售。多家中小型企业已经将此面板用作**服务器管理**和**销售平台**的结合。此外，它支持**多语言环境**，使其可供不同国家和地区的用户访问。
 
 <img width="3164" height="2060" alt="1" src="https://github.com/user-attachments/assets/570d2447-66dc-4c0b-b2d2-4c3176b51d67" />
 
@@ -60,7 +67,7 @@ MCSM 同样也考虑了**商业应用**，例如由 **IDC 服务提供商**进�
 
 控制面板可运行在 `Windows` 与 `Linux` 平台，无需安装数据库，只需安装 `Node.js` 环境和几个**用于解压缩**的命令。
 
-必须使用 [Node.js 16.20.2](https://nodejs.org/en) 以上，推荐使用最新版本 LTS 版本。
+必须使用 [Node.js 22.23.4](https://nodejs.org/en) 以上，推荐使用最新版本 LTS 版本。
 
 <br />
 
@@ -89,14 +96,15 @@ MCSM 同样也考虑了**商业应用**，例如由 **IDC 服务提供商**进�
 **一行命令快速安装**
 
 ```bash
-sudo su -c "wget -qO- https://script.mcsmanager.com/setup.sh | bash"
+sudo su -c "wget -qO- https://script.mcsmanager.com/setup_cn.sh | bash"
 ```
 
 **安装后的使用方法**
 
 ```bash
-systemctl start mcsm-{web,daemon} # 开启面板
-systemctl stop mcsm-{web,daemon}  # 关闭面板
+systemctl start mcsm-{web,daemon} # 开启面板和节点端
+systemctl stop mcsm-{web,daemon}  # 关闭面板和节点端
+systemctl disable mcsm-web #禁用面板端，适用于被控主机
 ```
 
 - 脚本仅适用于 Ubuntu/Centos/Debian/Archlinux
@@ -111,13 +119,13 @@ systemctl stop mcsm-{web,daemon}  # 关闭面板
 ```bash
 # 切换到安装目录。如果不存在，请提前用'mkdir /opt/'创建它。
 cd /opt/
-# 下载运行时环境（Node.js）。如果你已经安装了Node.js 16+，请忽略此步骤。
-wget https://nodejs.org/dist/v20.11.0/node-v20.11.0-linux-x64.tar.xz
+# 下载运行时环境（Node.js）。如果你已经安装了Node.js 22.23.4+，请忽略此步骤。
+wget https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-x64.tar.xz
 # 解压档案
-tar -xvf node-v20.11.0-linux-x64.tar.xz
+tar -xvf node-v22.23.4-linux-x64.tar.xz
 # 添加程序到系统环境变量。
-ln -s /opt/node-v20.11.0-linux-x64/bin/node /usr/bin/node
-ln -s /opt/node-v20.11.0-linux-x64/bin/npm /usr/bin/npm
+ln -s /opt/node-v22.23.4-linux-x64/bin/node /usr/bin/node
+ln -s /opt/node-v22.23.4-linux-x64/bin/npm /usr/bin/npm
 
 # 准备好安装目录。
 mkdir /opt/mcsmanager/
@@ -131,16 +139,16 @@ tar -zxf mcsmanager_linux_release.tar.gz
 chmod 775 install.sh
 ./install.sh
 
-# 请打开两个终端或screen。
+# 请打开两个终端或使用screen程序。
 
 # 先启动节点程序。
 ./start-daemon.sh
 
-# 启动网络服务(在第二个终端或screen)。
+# 启动面板程序(在第二个终端或screen)。
 ./start-web.sh
 
 # 访问 http://<公网 IP>:23333/ 查看面板。
-# 一般来说，网络应用会自动扫描并连接到本地守护进程。
+# 一般来说，面板端会自动扫描并连接到本地守护进程。
 ```
 
 这种安装方式不会自动注册面板到系统服务（Service），所以必须使用 `screen` 软件来管理，如果你希望由系统服务来接管 MCSManager，请参考文档。
@@ -177,7 +185,7 @@ chmod 775 install.sh
 ./start-web.sh
 
 # 访问 http://localhost:23333/ 查看面板。
-# 一般来说，网络应用会自动扫描并连接到本地守护进程。
+# 一般来说，面板端会自动扫描并连接到本地守护进程。
 ```
 
 <br />
@@ -193,9 +201,11 @@ services:
     ports:
       - "23333:23333"
     volumes:
+      - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
       - <CHANGE_ME_TO_INSTALL_PATH>/web/data:/opt/mcsmanager/web/data
       - <CHANGE_ME_TO_INSTALL_PATH>/web/logs:/opt/mcsmanager/web/logs
+      - <CHANGE_ME_TO_INSTALL_PATH>/web/public/upload_files:/opt/mcsmanager/web/public/upload_files
 
   daemon:
     image: githubyumao/mcsmanager-daemon:latest
@@ -215,11 +225,11 @@ services:
 注意（Linux Rootless Docker）：Daemon 端已支持读取 `DOCKER_HOST`。如果你的 Docker 运行在 rootless 模式，socket 通常位于 `/run/user/<uid>/docker.sock`（而不是 `/var/run/docker.sock`）。此时请把默认的 socket 挂载替换为 rootless socket，并设置 `DOCKER_HOST`，例如：
 
 ```yml
-  daemon:
-    environment:
-      - DOCKER_HOST=unix:///run/user/1000/docker.sock
-    volumes:
-      - /run/user/1000/docker.sock:/run/user/1000/docker.sock
+daemon:
+  environment:
+    - DOCKER_HOST=unix:///run/user/1000/docker.sock
+  volumes:
+    - /run/user/1000/docker.sock:/run/user/1000/docker.sock
 ```
 
 把 `1000` 替换成你的实际 UID（`id -u`）。
@@ -246,6 +256,18 @@ docker compose pull && docker compose up -d
 - 代码需要保持现有格式，不得格式化多余代码。
 
 - 所有代码必须符合国际化标准。
+
+### BUG 报告
+
+欢迎发现的任何问题进行反馈，必当及时修复。
+
+若发现严重安全漏洞又不便公开发布，请发送邮件至: support@mcsmanager.com，安全问题修复后将在代码中附加漏洞发现者姓名。
+
+### 鸣谢
+
+感谢以下开发者为 MCSManager 安全性提供重要的代码贡献！
+
+> [@Cuo256](https://github.com/Cuo256), [@xiaosu](https://github.com/xiaosuawa), [@tianjiefeifei](https://github.com/tianjiefeifei), [9Bakabaka](https://github.com/9Bakabaka)
 
 <br />
 
@@ -291,14 +313,6 @@ docker compose pull && docker compose up -d
 
 - 支持 `Chrome` `Firefox` `Safari` `Opera` 等现代主流浏览器。
 - 已放弃支持 `IE` 浏览器。
-
-<br />
-
-## BUG 报告
-
-欢迎发现的任何问题进行反馈，必当及时修复。
-
-若发现严重安全漏洞又不便公开发布，请发送邮件至: support@mcsmanager.com，安全问题修复后将在代码中附加漏洞发现者姓名。
 
 <br />
 

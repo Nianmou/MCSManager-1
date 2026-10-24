@@ -1,14 +1,19 @@
 import fs from "fs-extra";
 import iconv from "iconv-lite";
 import { ProcessWrapper } from "mcsmanager-common";
+import StreamZip from "node-stream-zip";
 import os from "os";
 import path from "path";
-import { compress, decompress } from "../common/compress";
+import { compress, decompress, listArchiveEntries } from "../common/compress";
 import { globalConfiguration } from "../entity/config";
 import { $t, i18next } from "../i18n";
+import { syncPathOwnershipWithinRoot } from "../tools/file_ownership";
+import type { FileOwnership } from "../tools/file_ownership";
 import { normalizedJoin } from "../tools/filepath";
+import { resolvePhysicalPath } from "../tools/path_link_check";
 
 const ERROR_MSG_01 = $t("TXT_CODE_system_file.illegalAccess");
+const ERROR_PATH_NOT_FOUND = $t("TXT_CODE_96281410");
 const MAX_EDIT_SIZE = 1024 * 1024 * 5;
 
 interface IFile {
@@ -41,12 +46,26 @@ export default class FileManager {
     return this.topPath === "/" || this.topPath === "\\";
   }
 
+  private isOutsideWorkspace(absPath: string): boolean {
+    // fix the /app/ vs /app mismatch bug and keep it secure
+    if (this.isRootTopRath()) return false;
+    const realTop = resolvePhysicalPath(this.topPath);
+    const realPath = resolvePhysicalPath(absPath);
+    if (!realTop || !realPath) return true; // If the path cannot be resolved, treat it as outside for safety
+    const relative = path.relative(realTop, realPath);
+    return relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative);
+  }
+
   toAbsolutePath(fileName: string = "") {
     const topAbsolutePath = this.topPath;
 
     let finalPath = "";
     if (path.normalize(fileName).indexOf(topAbsolutePath) === 0) {
-      finalPath = fileName;
+      // This value is what every caller passes to fs, so it must be the value the
+      // containment check below validates. Keeping the raw caller string let a
+      // symlink followed by '..' pass the lexical check and then be resolved
+      // physically by the kernel, escaping the instance workspace.
+      finalPath = path.normalize(fileName);
     } else if (os.platform() === "win32") {
       const reg = new RegExp("^[A-Za-z]{1}:[\\\\/]{1}");
       if (reg.test(this.cwd)) {
@@ -60,12 +79,7 @@ export default class FileManager {
       finalPath = path.normalize(path.join(this.topPath, this.cwd, fileName));
     }
 
-    // fix the /app/ vs /app mismatch bug and keep it secure
-    const relative = path.relative(topAbsolutePath, finalPath);
-    const isOutside =
-      relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative);
-    if (isOutside && topAbsolutePath !== "/" && topAbsolutePath !== "\\")
-      throw new Error(ERROR_MSG_01);
+    if (this.isOutsideWorkspace(finalPath)) throw new Error(ERROR_MSG_01);
     return finalPath;
   }
 
@@ -81,6 +95,8 @@ export default class FileManager {
       ? topAbsolutePath.slice(0, -1)
       : topAbsolutePath;
 
+    this.assertInsideWorkspace(destPath);
+
     if (destPath.startsWith(topPath)) {
       const parts = destPath.split(path.sep);
       return topPath.split(path.sep).every((part, index) => {
@@ -90,9 +106,16 @@ export default class FileManager {
     return false;
   }
 
+  assertInsideWorkspace(fileNameOrPath: string) {
+    const absPath = this.toAbsolutePath(fileNameOrPath);
+    if (this.isOutsideWorkspace(absPath)) throw new Error(ERROR_MSG_01);
+  }
+
   check(destPath: string) {
     if (this.isRootTopRath()) return true;
-    return this.checkPath(destPath) && fs.existsSync(this.toAbsolutePath(destPath));
+    if (!this.checkPath(destPath)) return false;
+    if (!fs.existsSync(this.toAbsolutePath(destPath))) return false;
+    return true;
   }
 
   cd(dirName: string) {
@@ -103,19 +126,30 @@ export default class FileManager {
   async list(page: 0, pageSize = 40, searchFileName?: string) {
     if (pageSize > 100 || pageSize <= 0 || page < 0) throw new Error("Beyond the value limit");
 
+    this.assertInsideWorkspace(".");
+
     // Use withFileTypes option to get file type directly, reducing stat calls
     const dirents = await fs.readdir(this.toAbsolutePath(), { withFileTypes: true });
 
     // Filter search results and create basic file info with type
-    let filteredItems = dirents
-      .filter(
-        (dirent) =>
-          !searchFileName || dirent.name.toLowerCase().includes(searchFileName.toLowerCase())
-      )
-      .map((dirent) => ({
-        name: dirent.name,
-        type: dirent.isFile() ? 1 : 0
-      }));
+    let filteredItems = await Promise.all(
+      dirents
+        .filter(
+          (dirent) =>
+            !searchFileName || dirent.name.toLowerCase().includes(searchFileName.toLowerCase())
+        )
+        .map(async (dirent) => {
+          let type = dirent.isFile() ? 1 : 0;
+          if (type === 0 && !dirent.isDirectory()) {
+            // Symbolic links may return false for both isFile() and isDirectory()
+            // see #2124
+            try {
+              type = (await fs.stat(this.toAbsolutePath(dirent.name))).isFile() ? 1 : 0;
+            } catch {}
+          }
+          return { name: dirent.name, type };
+        })
+    );
 
     const total = filteredItems.length;
 
@@ -195,7 +229,9 @@ export default class FileManager {
     // if (!FileManager.checkFileName(fileName)) throw new Error(ERROR_MSG_01);
     if (!this.checkPath(fileName)) throw new Error(ERROR_MSG_01);
     const target = this.toAbsolutePath(fileName);
-    fs.createFile(target);
+    const parentDir = path.resolve(path.dirname(target));
+    if (parentDir !== path.parse(parentDir).root) await fs.mkdir(parentDir, { recursive: true });
+    return await fs.createFile(target);
   }
 
   async copy(target1: string, target2: string) {
@@ -208,15 +244,17 @@ export default class FileManager {
   mkdir(target: string) {
     if (!this.checkPath(target)) throw new Error(ERROR_MSG_01);
     const targetPath = this.toAbsolutePath(target);
-    return fs.mkdirSync(targetPath);
+    return fs.mkdirSync(targetPath, { recursive: true });
   }
 
-  async delete(target: string): Promise<boolean> {
-    if (!this.check(target)) throw new Error(ERROR_MSG_01);
+  async delete(target: string, options: { ignoreMissing?: boolean } = {}): Promise<boolean> {
+    if (!this.checkPath(target)) throw new Error(ERROR_MSG_01);
     const targetPath = this.toAbsolutePath(target);
+    if (!options.ignoreMissing && !fs.existsSync(targetPath)) throw new Error(ERROR_MSG_01);
     return new Promise((r, j) => {
       fs.remove(targetPath, (err) => {
-        if (!err) r(true);
+        if (!err || (options.ignoreMissing && (err as NodeJS.ErrnoException).code === "ENOENT"))
+          r(true);
         else j(err);
       });
     });
@@ -230,18 +268,140 @@ export default class FileManager {
     await fs.move(targetPath, destPath);
   }
 
-  private zipFileCheck(path: string) {
-    const fileInfo = fs.statSync(path);
-    const MAX_ZIP_GB = globalConfiguration.config.maxZipFileSize;
-    if (fileInfo.size > 1024 * 1024 * 1024 * MAX_ZIP_GB)
-      throw new Error($t("TXT_CODE_system_file.unzipLimit", { max: MAX_ZIP_GB }));
-  }
-
-  async unzip(sourceZip: string, destDir: string, code?: string) {
+  async unzip(sourceZip: string, destDir: string, code?: string, ownership?: FileOwnership) {
     if (!code) code = this.fileCode;
     if (!this.check(sourceZip) || !this.checkPath(destDir)) throw new Error(ERROR_MSG_01);
     this.zipFileCheck(this.toAbsolutePath(sourceZip));
-    return await decompress(this.toAbsolutePath(sourceZip), this.toAbsolutePath(destDir), code);
+    const absSource = this.toAbsolutePath(sourceZip);
+    const absDest = this.toAbsolutePath(destDir);
+
+    const archiveEntries = await this.getArchiveEntries(absSource);
+    const hasZipSlip = this.hasZipSlip(absDest, archiveEntries);
+    if (hasZipSlip) throw new Error(ERROR_MSG_01);
+
+    const result = await decompress(absSource, absDest, code);
+    if (ownership) await this.syncArchiveOwnership(absDest, archiveEntries, ownership);
+    return result;
+  }
+
+  private async getArchiveEntries(
+    absSource: string
+  ): Promise<Array<{ name: string; isDirectory: boolean; linkTarget?: string }>> {
+    const zip = new StreamZip.async({ file: absSource });
+    let archiveEntries: Array<{ name: string; isDirectory: boolean; linkTarget?: string }>;
+    try {
+      // zip archive
+      const zipEntries = Object.values(await zip.entries());
+      archiveEntries = [];
+      for (const zipEntry of zipEntries) {
+        const entry: { name: string; isDirectory: boolean; linkTarget?: string } = {
+          name: zipEntry.name,
+          isDirectory: zipEntry.isDirectory
+        };
+        // Unix-created zips store symlinks with the link target as entry data
+        // and the S_IFLNK mode in the high attribute bits. The target must be
+        // part of the containment check below, so read it here and fail closed
+        // when it cannot be read.
+        if (!zipEntry.isDirectory && ((zipEntry.attr >>> 16) & 0xf000) === 0xa000) {
+          let target: Buffer;
+          try {
+            target = await zip.entryData(zipEntry.name);
+          } catch {
+            throw new Error(ERROR_MSG_01);
+          }
+          entry.linkTarget = target.toString("utf8");
+        }
+        archiveEntries.push(entry);
+      }
+    } catch (err: any) {
+      const reason = String(err?.message);
+      if (reason.includes("Malicious entry")) throw new Error(ERROR_MSG_01);
+      if (reason !== "Bad archive" && reason !== "Archive read error") throw err;
+
+      // other archive
+      archiveEntries = await listArchiveEntries(absSource);
+    } finally {
+      await zip.close().catch(() => {});
+    }
+    return archiveEntries;
+  }
+
+  /**
+   * Zip-Slip guard — reject the whole archive if ANY entry could write
+   * outside the extraction directory.
+   *
+   * Two simple rules (no kernel-symlink simulation needed):
+   *   1. The entry name, after normalizing '\' → '/', must not traverse
+   *      upward (contain a '..' segment).
+   *   2. A symlink target must not contain '..' segments, must not be an
+   *      absolute path outside the destination, and — when the target is
+   *      a plain name — must not resolve (via real on-disk links) outside
+   *      the destination.
+   *
+   * Rule 2 is intentionally aggressive ("一刀切"): a legitimate symlink whose
+   * target is e.g. "dir/../other" is also rejected.  This eliminates the
+   * symlink-chain escape (s1→. , s2→s1/.. , s2/file) at the cost of a
+   * rare false positive — which is the right trade-off for an archive
+   * extraction boundary.
+   */
+  private hasZipSlip(
+    absDest: string,
+    archiveEntries: Array<{ name: string; isDirectory: boolean; linkTarget?: string }>
+  ): boolean {
+    const destRoot = resolvePhysicalPath(absDest) ?? absDest;
+
+    for (const entry of archiveEntries) {
+      const segments = entry.name.split(/[\\/]/).filter(Boolean);
+
+      // Rule 1: entry name must not traverse upward
+      if (segments.includes("..")) return true;
+
+      // Rule 2: symlink target must not traverse upward or escape
+      if (entry.linkTarget) {
+        const targetSegs = entry.linkTarget.split(/[\\/]/).filter(Boolean);
+        if (targetSegs.includes("..")) return true;
+
+        const rawTarget = path.isAbsolute(entry.linkTarget)
+          ? entry.linkTarget
+          : path.join(absDest, entry.name, "..", entry.linkTarget);
+        const resolved = resolvePhysicalPath(rawTarget);
+        if (!resolved) return true;
+        const rel = path.relative(destRoot, resolved);
+        if (rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel)) return true;
+      }
+    }
+    return false;
+  }
+
+  private async syncArchiveOwnership(
+    absDest: string,
+    archiveEntries: Array<{ name: string; isDirectory: boolean }>,
+    ownership: FileOwnership
+  ): Promise<void> {
+    const paths = new Set<string>();
+    for (const entry of archiveEntries) {
+      const entryPath = path.resolve(absDest, entry.name);
+      if (entryPath === absDest) continue;
+      paths.add(entryPath);
+
+      let parentPath = path.dirname(entryPath);
+      while (parentPath !== absDest) {
+        paths.add(parentPath);
+        const nextParent = path.dirname(parentPath);
+        if (nextParent === parentPath) break;
+        parentPath = nextParent;
+      }
+    }
+
+    const orderedPaths = [...paths].sort((a, b) => b.length - a.length);
+    for (const targetPath of orderedPaths) {
+      try {
+        await syncPathOwnershipWithinRoot(this.topPath, targetPath, ownership);
+      } catch (error: any) {
+        if (error?.code === "ENOENT") continue;
+        throw error;
+      }
+    }
   }
 
   async zip(sourceZip: string, files: string[], code?: string) {
@@ -253,12 +413,12 @@ export default class FileManager {
     const filesPath = [];
     let totalSize = 0;
     for (const iterator of files) {
-      if (this.check(iterator)) {
-        filesPath.push(this.toAbsolutePath(iterator));
-        try {
+      try {
+        if (this.check(iterator)) {
+          filesPath.push(this.toAbsolutePath(iterator));
           totalSize += fs.statSync(this.toAbsolutePath(iterator))?.size;
-        } catch (error: any) {}
-      }
+        }
+      } catch (error: any) {}
     }
     if (totalSize > MAX_TOTAL_FIELS_SIZE)
       throw new Error($t("TXT_CODE_system_file.unzipLimit", { max: MAX_ZIP_GB }));
@@ -294,5 +454,12 @@ export default class FileManager {
       if (fileName.includes(ch)) return false;
     }
     return true;
+  }
+
+  private zipFileCheck(path: string) {
+    const fileInfo = fs.statSync(path);
+    const MAX_ZIP_GB = globalConfiguration.config.maxZipFileSize;
+    if (fileInfo.size > 1024 * 1024 * 1024 * MAX_ZIP_GB)
+      throw new Error($t("TXT_CODE_system_file.unzipLimit", { max: MAX_ZIP_GB }));
   }
 }

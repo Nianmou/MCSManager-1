@@ -1,9 +1,8 @@
-import { exec } from "child_process";
+import { spawn } from "child_process";
 import fs from "fs-extra";
 import { t } from "i18next";
 import { ProcessWrapper } from "mcsmanager-common";
 import path from "path";
-import { promisify } from "util";
 import { GOLANG_ZIP_PATH, SEVEN_ZIP_PATH, ZIP_TIMEOUT_SECONDS } from "../const";
 import { $t } from "../i18n";
 import logger from "../service/log";
@@ -14,7 +13,29 @@ import {
   isZipFormat
 } from "../service/seven_zip_service";
 
-const execPromise = promisify(exec);
+function runSpawn(
+  cmd: string,
+  args: string[],
+  opts: { cwd: string; timeout: number }
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(cmd, args, { cwd: opts.cwd, timeout: opts.timeout });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (d: Buffer) => (stdout += d.toString()));
+    child.stderr?.on("data", (d: Buffer) => (stderr += d.toString()));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) resolve({ stdout, stderr });
+      else {
+        const err = new Error(`7zip exited with code ${code}: ${stderr || stdout}`);
+        (err as any).stdout = stdout;
+        (err as any).stderr = stderr;
+        reject(err);
+      }
+    });
+  });
+}
 
 const COMPRESS_ERROR_MSG = {
   invalidName: t("TXT_CODE_3aa9f36"),
@@ -70,7 +91,7 @@ export async function decompress(
     }
   };
 
-  if (!await check7zipStatus()) {
+  if (await check7zipStatus()) {
     try {
       return await use7zip(zipPath, dest);
     } catch (error) {
@@ -82,25 +103,59 @@ export async function decompress(
   }
 }
 
+export interface ArchiveEntryInfo {
+  name: string;
+  isDirectory: boolean;
+  // Symbolic-link target as stored in the archive (present only for links).
+  linkTarget?: string;
+}
+
+export async function listArchiveEntries(sourceArchive: string): Promise<ArchiveEntryInfo[]> {
+  const { stdout } = await runSpawn(
+    SEVEN_ZIP_PATH,
+    ["l", "-slt", "-ba", "-sccUTF-8", sourceArchive],
+    {
+      cwd: path.dirname(sourceArchive),
+      timeout: ZIP_TIMEOUT_SECONDS * 1000
+    }
+  );
+
+  const entries: ArchiveEntryInfo[] = [];
+  let currentEntry: ArchiveEntryInfo | undefined;
+  for (const line of stdout.split(/\r?\n/)) {
+    if (line.startsWith("Path = ")) {
+      if (currentEntry) entries.push(currentEntry);
+      currentEntry = {
+        name: line.slice("Path = ".length),
+        isDirectory: false
+      };
+    } else if (
+      currentEntry &&
+      (line === "Folder = +" || line === "Attributes = D" || line.startsWith("Attributes = D "))
+    ) {
+      currentEntry.isDirectory = true;
+    } else if (currentEntry && line.startsWith("Symbolic Link = ")) {
+      // 7-Zip reports the link target for symlink entries; empty for regular
+      // files. The caller needs it to contain-check links before extraction.
+      const target = line.slice("Symbolic Link = ".length);
+      if (target) currentEntry.linkTarget = target;
+    }
+  }
+  if (currentEntry) entries.push(currentEntry);
+  return entries;
+}
+
 /**
  * Decompress using 7zip
  */
 async function use7zip(sourceZip: string, destDir: string): Promise<boolean> {
   try {
-    const sourceDir = path.dirname(sourceZip);
-    const normalizedDest = path.normalize(destDir);
-    const normalizedSource = path.normalize(sourceDir);
-
-    let command: string;
-    let workingDir: string;
-
     await fs.ensureDir(destDir);
-    command = `"${SEVEN_ZIP_PATH}" x "${sourceZip}" "-o${destDir}" -aoa`;
-    workingDir = sourceDir;
-    logger.info($t("TXT_CODE_35d2ee7a", { command }));
+    const args = ["x", sourceZip, `-o${destDir}`, "-aoa"];
+    logger.info($t("TXT_CODE_35d2ee7a", { command: `${SEVEN_ZIP_PATH} ${args.join(" ")}` }));
 
-    const { stdout, stderr } = await execPromise(command, {
-      cwd: workingDir,
+    const { stdout, stderr } = await runSpawn(SEVEN_ZIP_PATH, args, {
+      cwd: path.dirname(sourceZip),
       timeout: ZIP_TIMEOUT_SECONDS * 1000
     });
 

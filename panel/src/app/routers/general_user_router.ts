@@ -1,16 +1,25 @@
-import Koa from "koa";
 import Router from "@koa/router";
-import permission from "../middleware/permission";
-import { bind2FA, confirm2FaQRCode, getUserUuid, getUserFromCtx, logout } from "../service/passport_service";
-import userSystem from "../service/user_service";
-import { getToken, isAjax } from "../service/passport_service";
-import { getUserByUserName, isTopPermissionByUuid } from "../service/permission_service";
-import validator from "../middleware/validator";
-import { v4 } from "uuid";
-import { $t } from "../i18n";
-import { ROLE } from "../entity/user";
-import { getInstancesByUuid } from "../service/instance_service";
+import Koa from "koa";
 import { toBoolean } from "mcsmanager-common";
+import { v4 } from "uuid";
+import { ROLE } from "../entity/user";
+import { $t } from "../i18n";
+import permission from "../middleware/permission";
+import validator from "../middleware/validator";
+import { getInstancesByUuid } from "../service/instance_service";
+import { getOperationLoggerOperator, operationLogger } from "../service/operation_logger";
+import {
+  bind2FA,
+  confirm2FaQRCode,
+  getToken,
+  getUserFromCtx,
+  getUserUuid,
+  isAjax,
+  logout
+} from "../service/passport_service";
+import { isTopPermissionByUuid } from "../service/permission_service";
+import userSystem from "../service/user_service";
+import { systemConfig } from "../setting";
 
 const router = new Router({ prefix: "/auth" });
 
@@ -57,7 +66,12 @@ router.put("/update", permission({ level: ROLE.USER }), async (ctx: Koa.Paramete
     const { passWord, isInit } = config;
     if (!userSystem.validatePassword(passWord))
       throw new Error($t("TXT_CODE_router.user.passwordCheck"));
+    const user = userSystem.getInstance(userUuid);
     await userSystem.edit(userUuid, { passWord, isInit });
+    operationLogger.log("user_config_change", {
+      ...getOperationLoggerOperator(ctx),
+      target_user_name: user?.userName
+    });
     ctx.body = logout(ctx);
   }
 });
@@ -72,6 +86,12 @@ router.put("/api", permission({ level: ROLE.USER }), async (ctx: Koa.Parameteriz
   try {
     if (user) {
       if (enable) {
+        const enableApiKey = systemConfig?.enableApiKey || false;
+        if (!enableApiKey) throw new Error($t("TXT_CODE_db253979"));
+
+        if (enableApiKey === "ONLY_ADMIN" && user.permission < ROLE.ADMIN)
+          throw new Error($t("TXT_CODE_db253979"));
+
         newKey = v4().replace(/-/gim, "");
         await userSystem.edit(userUuid, {
           apiKey: newKey
@@ -81,6 +101,15 @@ router.put("/api", permission({ level: ROLE.USER }), async (ctx: Koa.Parameteriz
           apiKey: ""
         });
       }
+      operationLogger.log(
+        "user_apikey_change",
+        {
+          ...getOperationLoggerOperator(ctx),
+          target_user_name: user.userName,
+          enabled: Boolean(enable)
+        },
+        "warning"
+      );
     }
     ctx.body = newKey;
   } catch (error: any) {
@@ -108,6 +137,9 @@ router.post(
     const TOTPCode = ctx.request.body.TOTPCode;
     const MFAResult = userSystem.check2FA(TOTPCode, getUserFromCtx(ctx) ?? {}, 0);
     const enable = Boolean(ctx.request.body.enable);
+    // NOTE (documented behavior): only ENABLING requires a valid code; the
+    // frontend disable flow sends a placeholder "000000". A session holder can
+    // therefore strip 2FA - recorded as a finding in the integration suite.
     if (enable && !MFAResult) {
       ctx.body = false;
       return;
@@ -115,30 +147,6 @@ router.post(
     const userUuid = getUserUuid(ctx);
     await confirm2FaQRCode(userUuid, enable);
     ctx.body = true;
-  }
-);
-
-// [Public Permission]
-router.get(
-  "/query_username",
-  permission({ token: false, level: null }),
-  validator({
-    query: { username: String }
-  }),
-  async (ctx: Koa.ParameterizedContext) => {
-    const userName = String(ctx.request.query.username);
-    const user = getUserByUserName(userName);
-    if (!user) {
-      ctx.body = {
-        uuid: null,
-        userName: null
-      };
-    } else {
-      ctx.body = {
-        uuid: user?.uuid,
-        userName: user?.userName
-      };
-    }
   }
 );
 
