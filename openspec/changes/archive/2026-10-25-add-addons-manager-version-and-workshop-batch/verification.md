@@ -49,3 +49,25 @@ The previous operator decision to defer game plugin activation until maintenance
 Installing the new DLL does not prove that a running game loaded it. Live AddonsManager acceptance
 also requires configured RCON and a supporting loaded plugin. No RCON passwords/configuration are
 modified by this change. See the production release report for hashes, deployment coverage and rollback.
+
+## Publication and deployment completed
+
+Implementation is published to `Nianmou/MCSManager-1` on `codex/addons-manager-workshop` (initial
+implementation `709845360097910541ef8d5667e8a361c69509c9`) and the focused companion overlay is on
+`MatthewNeko/PreAimMode` at `f38b86a269fe0d410c2b08cce77d6c9ef74a1421`.
+
+The final release-source sequential integration passes 179 tests across 15 runnable suites, with one
+individual environment skip and the Docker suite skipped on Windows. Published assets pass the same
+headless fixture checks after allowing for public download latency. All 59 public frontend files match
+their SHA256 hashes. All eight nodes authenticate, installed artifacts match, services are active,
+anonymous command requests return 403 and integration bypass is disabled.
+
+The panel and eight daemons are updated; seven game hosts have PreAimMode 2.0.2.0 files installed.
+All 19 game container/process identities and real instance records are preserved. The first canary
+rolled back on a synthetic-template timestamp/port validation false positive, which was narrowed and
+successfully retried with unchanged games. Paired panel/local-daemon data and each game-node data
+have owner-only backups. No Workshop download, game restart or plugin reload was requested.
+
+All 19 current instance configurations enable RCON, while current runtime observations remain
+unavailable. Activation and live runtime-version acceptance remain explicitly deferred by the operator's
+previous maintenance decision; this release does not claim those observations succeeded.

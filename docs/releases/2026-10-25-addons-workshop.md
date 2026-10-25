@@ -50,7 +50,46 @@ isolated fixtures and there are no page errors or production command sends.
 
 The shared-workspace full integration passes all 16 runnable suites and 187 tests, with one
 individual environment skip; the Docker suite is skipped on Windows. The release-source full integration passes all 15 runnable suites and 179 tests, with one
-individual environment skip and the Docker suite skipped. Production results are appended after deployment.
+individual environment skip and the Docker suite skipped.
+
+## Production outcome
+
+Deployment and verification completed on 2026-10-25. The bundled panel is running on 124, and all
+eight daemon nodes have the manifest's daemon hash. All seven game nodes have matching companion
+DLL/deps/PDB files. Host checks verify 67 installed files on the panel host and seven on each game host;
+services are active and integration-test authentication bypass is disabled.
+
+| SSH target | Running game containers preserved |
+| --- | ---: |
+| cs2-txy-bj | 2 |
+| cs2-txy-gz-1 | 3 |
+| cs2-xgy-zjbgp-1 | 3 |
+| cs2-xgy-zjbgp-2 | 3 |
+| cs2-xgy-sdzz | 2 |
+| cs2-neko-zjbgp-1 | 3 |
+| cs2-neko-zjbgp-2 | 3 |
+| prod-124 | 0 |
+
+All 19 game containers retained their IDs, PIDs and start times, and game-process start identifiers
+remained unchanged. Accounts, node credentials, real instance settings and schedules passed preservation
+checks. All eight registered nodes authenticated after deployment. Public HTTP returns 200; all 59
+frontend files match their manifest hashes over public HTTP, and anonymous command access returns 403.
+Headless checks against the published assets pass with every API intercepted by isolated fixtures.
+Public asset downloads initially exceeded the browser/read verification timeouts; bounded read retries
+and shared browser caching completed the checks without changing production code.
+
+The first Beijing attempt automatically rolled back because the validator treated synthetic global
+template `createDatetime` and `basePort` refreshes as real configuration changes. Read-only comparison
+confirmed that both real instance records and containers were unchanged. The validator now permits
+only those template runtime fields (alongside `lastDatetime`), and the retry passed. The first attempt
+and backup remain under `20261025-1130-addons-workshop-attempt1` on that host.
+
+GitHub implementation commit:
+<https://github.com/Nianmou/MCSManager-1/commit/709845360097910541ef8d5667e8a361c69509c9>.
+Companion feature overlay:
+<https://github.com/MatthewNeko/PreAimMode/tree/codex/addons-manager-runtime>, final feature diff at
+`f38b86a269fe0d410c2b08cce77d6c9ef74a1421`. A corrective follow-up removes the unrelated Panorama
+resources staged by the repository hook; its final branch diff contains only the feature and tests.
 
 ## Rollout and rollback
 
@@ -72,6 +111,8 @@ Workshop download cannot be undone by rolling back the panel.
 ## Activation limits
 
 Plugin files are deployed for later maintenance activation. The existing panel RCON configuration
-is retained. Until RCON is configured and the supporting DLL is loaded, live version values can remain
-unknown; no file-on-disk version is shown as a runtime observation. No live CS2 download or player-view
-acceptance has been performed.
+is retained. Post-deployment inspection finds RCON enabled on all 19 instances, with zero currently
+available runtime observations. Enabling the switch alone does not prove connectivity or a supporting
+loaded plugin. The new DLL has not been hot-reloaded; live AddonsManager version acceptance remains
+pending maintenance activation and a successful authenticated observation. No file-on-disk version is
+shown as a runtime observation. No live CS2 download or player-view acceptance has been performed.

@@ -1,0 +1,26 @@
+{
+  "release": "20261025-1130-addons-workshop",
+  "panelDeployed": true,
+  "daemonsDeployed": 8,
+  "pluginFileHosts": 7,
+  "pluginVersion": "2.0.2.0",
+  "pluginActivated": false,
+  "gameContainersPreserved": 19,
+  "nodeAuthenticationPassed": 8,
+  "publicAssetFilesVerified": 59,
+  "anonymousCommandStatus": 403,
+  "workshopCommandsSent": 0,
+  "gameRestartsRequested": 0,
+  "tests": {
+    "frontend": 173,
+    "pluginFeatureChecks": 18,
+    "pluginSharedChecks": 51,
+    "daemonSkipped": 1,
+    "integrationIndividualSkipped": 1,
+    "common": 58,
+    "panel": 82,
+    "integrationPassed": 179,
+    "dockerSuite": "skipped on Windows",
+    "daemonPassed": 174
+  }
+}

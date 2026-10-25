@@ -22,5 +22,5 @@
 
 ## 4. Authorized publication and deployment
 
-- [ ] 4.1 Commit the reviewed release source and required completed baseline dependencies to GitHub feature branches, excluding the unfinished shared function groups; verify remote commit identities before deployment.
-- [ ] 4.2 Deploy the verified release to the 124 panel and its seven game nodes with paired backups, preserving game container/PID continuity and credentials; verify public assets, node authentication, installed hashes and anonymous command denial. Preserve deferred plugin activation and send no live Workshop or game lifecycle test commands.
+- [x] 4.1 Commit the reviewed release source and required completed baseline dependencies to GitHub feature branches, excluding the unfinished shared function groups; verify remote commit identities before deployment.
+- [x] 4.2 Deploy the verified release to the 124 panel and its seven game nodes with paired backups, preserving game container/PID continuity and credentials; verify public assets, node authentication, installed hashes and anonymous command denial. Preserve deferred plugin activation and send no live Workshop or game lifecycle test commands.
