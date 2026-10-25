@@ -6,6 +6,7 @@ import validator from "../middleware/validator";
 import { getOperationLoggerOperator, operationLogger } from "../service/operation_logger";
 import RemoteRequest from "../service/remote_command";
 import RemoteServiceSubsystem from "../service/remote_service";
+import { listNodeSchedules } from "../service/schedule_overview";
 
 const router = new Router({ prefix: "/service" });
 
@@ -116,10 +117,10 @@ router.get("/remote_services_schedule_global", permission({ level: ROLE.ADMIN })
   const promises = Array.from(RemoteServiceSubsystem.services.values()).map(
     async (remoteService) => {
       try {
-        const tasks = await new RemoteRequest(remoteService).request("schedule/list_all", {});
+        const schedules = await listNodeSchedules(new RemoteRequest(remoteService));
         result[remoteService.uuid] = {
           available: remoteService.available,
-          tasks: Array.isArray(tasks) ? tasks : []
+          ...schedules
         };
       } catch (err: any) {
         result[remoteService.uuid] = {

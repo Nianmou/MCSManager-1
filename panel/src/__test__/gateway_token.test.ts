@@ -65,9 +65,11 @@ describe("gateway_token — rejection cases", () => {
       op: "download",
       target: "file.txt"
     });
-    // Flip the last character of the signature.
-    const last = token[token.length - 1] === "A" ? "B" : "A";
-    const tampered = token.slice(0, -1) + last;
+    // Mutate decoded bytes: the final base64url character may contain only padding bits.
+    const dot = token.lastIndexOf(".");
+    const signature = Buffer.from(token.slice(dot + 1), "base64url");
+    signature[0] ^= 1;
+    const tampered = token.slice(0, dot + 1) + signature.toString("base64url");
     expect(verifyProxyToken(tampered, "download")).toBeNull();
   });
 

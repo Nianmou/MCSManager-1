@@ -19,6 +19,7 @@ import InstanceDiskCheckTask from "./task/any_stats";
 import DockerStatsTask from "./task/docker_stats";
 import PingMinecraftServerTask from "./task/mc_players";
 import TimeCheck from "./task/time";
+import Cs2RuntimeTask from "./task/cs2_runtime";
 
 // If you add a new "Preset", Please add the definition here.
 export type IPresetCommand =
@@ -75,6 +76,8 @@ export default class FunctionDispatcher extends InstanceCommand {
     }
     if (instance.config.enableRcon) {
       instance.setPreset("command", new RconCommand());
+      if (!instance.config.type.includes("minecraft"))
+        instance.lifeCycleTaskManager.registerLifeCycleTask(new Cs2RuntimeTask());
     }
 
     // Minecraft Ping

@@ -21,6 +21,7 @@ import { middleware as protocolMiddleware } from "./app/middleware/protocol";
 import { logger } from "./app/service/log";
 import SystemRemoteService from "./app/service/remote_service";
 import SystemUser from "./app/service/user_service";
+import { restartNotices } from "./app/service/restart_notice_service";
 import versionAdapter from "./app/service/version_adapter";
 import { initSystemConfig, systemConfig } from "./app/setting";
 import ProxyDataPlane from "./app/service/proxy_data_plane";
@@ -144,6 +145,7 @@ _  /  / / / /___  ____/ /_  /  / / / /_/ /_  / / / /_/ /_  /_/ //  __/  /
   // Initialize services
   await SystemUser.initialize();
   await SystemRemoteService.initialize();
+  await restartNotices.initialize();
 
   const app = new Koa({
     proxy: systemConfig?.reverseProxyMode || false,

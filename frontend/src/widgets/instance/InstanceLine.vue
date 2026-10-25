@@ -18,11 +18,11 @@ import {
   FrownOutlined,
   PauseCircleOutlined,
   PlayCircleOutlined,
-  RedoOutlined,
-  UserOutlined
+  RedoOutlined
 } from "@ant-design/icons-vue";
 import { message } from "ant-design-vue";
 import type { ColumnType } from "ant-design-vue/es/table";
+import InstanceTelemetry from "./InstanceTelemetry.vue";
 
 const props = defineProps<{
   column: ColumnType<any>;
@@ -170,10 +170,10 @@ const handleNameClick = () => {
     </template>
 
     <template v-else-if="column.key === 'players' && !node">
-      <div v-if="record.inst.info?.mcPingOnline">
-        <UserOutlined />
-        {{ record.inst.info?.currentPlayers }} / {{ record.inst.info?.maxPlayers }}
-      </div>
+      <InstanceTelemetry :instance="targetInstanceInfo" field="players" />
+    </template>
+    <template v-else-if="column.key === 'versions' && !node">
+      <InstanceTelemetry :instance="targetInstanceInfo" field="versions" />
     </template>
 
     <template v-else-if="column.key === 'actions' && !node">

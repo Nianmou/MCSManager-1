@@ -17,7 +17,20 @@ type UploadOptions = {
   code?: string;
 };
 
+export type UploadResult = { status: "success" | "failed" | "canceled"; error?: string };
+
 export class UploadFiles {
+  result?: UploadResult;
+  private resolveCompletion!: (result: UploadResult) => void;
+  readonly completion = new Promise<UploadResult>((resolve) => {
+    this.resolveCompletion = resolve;
+  });
+
+  settle(result: UploadResult) {
+    if (this.result) return;
+    this.result = result;
+    this.resolveCompletion(result);
+  }
   file: File;
   id: string | undefined;
   url: string;
@@ -84,6 +97,9 @@ export class UploadFiles {
       uploadService.update();
     } catch (err: any) {
       this.removing = true;
+      this.prepared = true;
+      this.settle({ status: "failed", error: String(err.message || err) });
+      uploadService.update();
       return reportErrorMsg(err.response?.data || err.message);
     }
   }
@@ -142,20 +158,22 @@ export class UploadFiles {
   }
 
   async stop() {
+    this.canceled = true;
+    this.settle({ status: "canceled" });
     if (!this.prepared) {
-      this.canceled = true;
       return;
     }
-
-    const { execute: uploadFile } = uploadFileApi();
-    await uploadFile({
-      url: `${this.url}/upload-new/${this.id}`,
-      params: {
-        stop: true
-      }
-    });
-    this.onEnd();
-    uploadService.files.delete(this.id!);
+    uploadService.remove(this);
+    try {
+      const { execute: uploadFile } = uploadFileApi();
+      if (this.pieceUrl)
+        await uploadFile({
+          url: `${this.url}/upload-new/${this.id}`,
+          params: { stop: true }
+        });
+    } finally {
+      this.onEnd();
+    }
   }
 }
 
@@ -206,6 +224,7 @@ class UploadTask {
   }
 
   onError(error: any) {
+    if (this.file.canceled) return;
     const isStopping = this.status == "stopping";
     console.error("Upload error:", error);
     if (!isStopping) {
@@ -225,6 +244,7 @@ class UploadTask {
     if (msg == "Access denied: No task found" || msg == "File is not opened") {
       // usually caused by multi-tab upload, just remove the task
       this.status = "removing";
+      this.file.settle({ status: "failed", error: String(msg) });
       return uploadService.update();
     }
     this.status = "failed";
@@ -233,6 +253,7 @@ class UploadTask {
     if (!isStopping && this.retries < 3) {
       this.start(); // async
     } else {
+      if (!isStopping) this.file.settle({ status: "failed", error: String(msg) });
       uploadService.update();
       console.error(
         "Max retries reached for file piece:",
@@ -251,6 +272,7 @@ class UploadTask {
   }
 
   onCompleted() {
+    if (this.file.canceled) return;
     this.status = "completed";
     this.file.uploadedSize += this.rangeEnd - this.rangeStart;
     uploadService.update();
@@ -307,11 +329,24 @@ class UploadService {
       return;
     }
     const file = this.files.get(oldId)!;
+    if (!file) return;
     this.files.set(newId, file);
     this.files.delete(oldId);
     if (this.current == oldId) {
       this.current = newId;
     }
+  }
+
+  remove(file: UploadFiles) {
+    this.files.delete(file.id!);
+    if (this.current === file.id) {
+      this.task.forEach((task) => task?.stop());
+      this.task = [];
+      this.current = this.files.keys().next().value;
+      this.status = this.current ? "working" : "stopped";
+      if (this.current) this.files.get(this.current)?.onStart();
+    }
+    this.update();
   }
 
   update() {
@@ -340,6 +375,7 @@ class UploadService {
     }
     if (this.status == "working" && this.current) {
       const currentFile = this.files.get(this.current)!;
+      removeFile ||= currentFile.removing;
       let reachTaskEnd = removeFile;
 
       if (removeFile) {
@@ -370,6 +406,7 @@ class UploadService {
       }
       if (reachTaskEnd && currentFile.prepared && tasks == 0) {
         const currentFile = this.files.get(this.current)!;
+        currentFile.settle({ status: removeFile ? "failed" : "success" });
         currentFile.onEnd();
         if (!removeFile) {
           this.uploaded += 1;
@@ -448,7 +485,7 @@ class UploadService {
   }
 
   updateProgress() {
-    if (!this.current) {
+    if (!this.current || !this.files.has(this.current)) {
       this.uiData.value = {
         files: [this.uploaded, this.uploaded + this.files.size],
         suspending: this.status == "suspend"

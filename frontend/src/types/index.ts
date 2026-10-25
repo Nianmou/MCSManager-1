@@ -29,6 +29,14 @@ export enum DataPlaneMode {
 }
 
 export interface InstanceRuntimeInfo {
+  cs2?: {
+    state: "available" | "unavailable";
+    checkedAt: number;
+    players?: number;
+    pluginVersion?: string;
+    platformVersion?: string;
+    addonsManager?: { state: "loaded" | "not_loaded" | "unknown"; version?: string };
+  };
   mcPingOnline: boolean;
   currentPlayers: number;
   maxPlayers: number;

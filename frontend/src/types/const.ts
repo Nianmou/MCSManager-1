@@ -96,6 +96,7 @@ export enum ScheduleActionTypeEnum {
   Stop = "stop",
   Start = "start",
   Restart = "restart",
+  RestartNotice = "restart_notice",
   Kill = "kill"
 }
 
@@ -110,7 +111,8 @@ export const ScheduleActionType = {
   [ScheduleActionTypeEnum.Command]: t("TXT_CODE_b7cab91d"),
   [ScheduleActionTypeEnum.Stop]: t("TXT_CODE_148d6467"),
   [ScheduleActionTypeEnum.Start]: t("TXT_CODE_8c7318b3"),
-  [ScheduleActionTypeEnum.Restart]: t("TXT_CODE_77cc12da"),
+  [ScheduleActionTypeEnum.Restart]: t("TXT_CODE_scheduleNotice.legacyRestart"),
+  [ScheduleActionTypeEnum.RestartNotice]: t("TXT_CODE_restartNotice.action"),
   [ScheduleActionTypeEnum.Kill]: t("TXT_CODE_1c36c8f2")
 };
 

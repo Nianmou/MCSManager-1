@@ -35,6 +35,7 @@ import { message, Modal } from "ant-design-vue";
 import _ from "lodash";
 import prettyBytes, { type Options as PrettyOptions } from "pretty-bytes";
 import { computed, ref } from "vue";
+import InstanceTelemetry from "./InstanceTelemetry.vue";
 
 const props = defineProps<{
   card: LayoutCard;
@@ -308,7 +309,7 @@ const instanceOperations = computed(() =>
                 {{ statusText }}
               </span>
             </a-tag>
-
+            <InstanceTelemetry :instance="instanceInfo" field="players" />
             <div v-if="instanceInfo?.config.tag && instanceInfo?.config.tag.length > 0">|</div>
             <a-tag v-for="item in instanceInfo?.config.tag" :key="item" class="m-0">
               {{ item }}
@@ -317,6 +318,9 @@ const instanceOperations = computed(() =>
           <div class="instance-info-line">
             <span class="title">{{ t("TXT_CODE_2f291d8b") }}:</span>
             <span class="value"> {{ instanceTypeText }}</span>
+          </div>
+          <div class="instance-info-line">
+            <InstanceTelemetry :instance="instanceInfo" field="versions" />
           </div>
           <div class="instance-info-line">
             <span class="title">{{ t("TXT_CODE_34611898") }}:</span>

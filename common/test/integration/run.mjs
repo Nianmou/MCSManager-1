@@ -15,9 +15,12 @@ const SUITES = [
   "auth",
   "user",
   "instance",
+  "restart_notice",
+  "cs2_operations",
   "files",
   "streams",
   "dataplane",
+  "deployment",
   "proxy_advanced",
   "security_user",
   "security_instance",
@@ -79,7 +82,7 @@ function runSuite(name) {
       file,
       "--reporter=verbose"
     ],
-    { cwd: path.resolve(__dirname, "../.."), stdio: "inherit" }
+    { cwd: path.resolve(__dirname, "../.."), stdio: "inherit", windowsHide: true }
   );
   return r.status;
 }

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import path from "node:path";
+import fs from "node:fs";
 import {
   world,
   requestPanel,
@@ -152,6 +153,112 @@ describe("instance: lifecycle + config (bare, no network)", () => {
         "dispatch: DESIGN FOR SPEED, no network, ~1 min total; DO NOT include" +
         " quick_install/reinstall its (they download a ~52MB jar and block for minutes)"
     });
+  });
+
+  it("schedule overview matches the owner's per-instance plans", async () => {
+    const query = { daemonId: di(), uuid: iu() };
+    const session = { cookie: u1().cookie, token: u1().token };
+    const created = await requestPanel({
+      method: "POST", path: "/protected_schedule", ...session, query,
+      body: { name: "overview-regression", count: 1, time: "86400", type: 1,
+        actions: [{ type: "command", payload: "echo schedule-test" }] }
+    });
+    expect(created.httpStatus).toBe(200);
+    try {
+      const single = await requestPanel({ method: "GET", path: "/protected_schedule", ...session, query });
+      expect(single.data.some((task: any) => task.name === "overview-regression")).toBe(true);
+      const overview = await requestPanel({
+        method: "GET", path: "/service/remote_services_schedule_global", key: world.key
+      });
+      expect(overview.httpStatus).toBe(200);
+      expect(overview.data[di()].available).toBe(true);
+      expect(overview.data[di()].error).toBeUndefined();
+      expect(overview.data[di()].tasks.filter((task: any) => task.instanceUuid === iu()))
+        .toEqual(single.data);
+    } finally {
+      await requestPanel({ method: "DELETE", path: "/protected_schedule", ...session,
+        query: { ...query, task_name: "overview-regression" } });
+    }
+  });
+
+  it("schedule mutations preserve duplicates, persist data, and delete only the named plan", async () => {
+    const query = { daemonId: di(), uuid: iu() };
+    const session = u1();
+    const original = {
+      name: "bulk-preserved", count: -1, time: "86400", type: 1,
+      actions: [{ type: "command", payload: "echo preserved" }]
+    };
+    const sibling = { ...original, name: "bulk-sibling" };
+    const storedPath = (name: string) =>
+      path.join(world.workDir, "daemon", "data", "TaskConfig", `${iu()}_${name}.json`);
+    const call = (method: "GET" | "POST" | "DELETE", body?: any, name?: string) =>
+      requestPanel({ method, path: "/protected_schedule", ...session,
+        query: { ...query, ...(name ? { task_name: name } : {}) }, body });
+    try {
+      expect((await call("POST", original)).data).toBe(true);
+      expect((await call("POST", sibling)).data).toBe(true);
+      const duplicate = await call("POST", { ...original, time: "172800",
+        actions: [{ type: "stop", payload: "" }] });
+      expect(duplicate.httpStatus).not.toBe(200);
+      const list = await call("GET");
+      expect(list.data.find((task: any) => task.name === original.name)).toMatchObject(original);
+      expect(JSON.parse(fs.readFileSync(storedPath(original.name), "utf8"))).toMatchObject(original);
+      expect((await call("DELETE", undefined, sibling.name)).data).toBe(true);
+      const remaining = await call("GET");
+      expect(remaining.data.map((task: any) => task.name)).toContain(original.name);
+      expect(remaining.data.map((task: any) => task.name)).not.toContain(sibling.name);
+      expect(fs.existsSync(storedPath(sibling.name))).toBe(false);
+      expect(fs.existsSync(storedPath(original.name))).toBe(true);
+    } finally {
+      await call("DELETE", undefined, original.name);
+      await call("DELETE", undefined, sibling.name);
+    }
+    expect(fs.existsSync(storedPath(original.name))).toBe(false);
+  });
+
+  it("schedule GET/POST/DELETE reject an unassigned user without changing existing plans", async () => {
+    const query = { daemonId: di(), uuid: iu() };
+    const body = { name: "authorization-preserved", count: 1, time: "86400", type: 1,
+      actions: [{ type: "restart", payload: "" }] };
+    expect((await requestPanel({ method: "POST", path: "/protected_schedule", ...u1(), query, body })).data)
+      .toBe(true);
+    try {
+      for (const method of ["GET", "POST", "DELETE"] as const) {
+        const denied = await requestPanel({ method, path: "/protected_schedule",
+          cookie: world.u2.cookie!, token: world.u2.token!,
+          query: { ...query, task_name: body.name },
+          ...(method === "POST" ? { body: { ...body, name: "unauthorized" } } : {}) });
+        expect(denied.httpStatus, `${method} must enforce instance ownership`).toBe(403);
+      }
+      const list = await requestPanel({ method: "GET", path: "/protected_schedule", ...u1(), query });
+      expect(list.data.map((task: any) => task.name)).toEqual([body.name]);
+    } finally {
+      await requestPanel({ method: "DELETE", path: "/protected_schedule", ...u1(),
+        query: { ...query, task_name: body.name } });
+    }
+  });
+
+  it("schedule capacity accepts eight plans and rejects the ninth without replacing any", async () => {
+    const query = { daemonId: di(), uuid: iu() };
+    const names = Array.from({ length: 9 }, (_, i) => `capacity-${i}`);
+    try {
+      for (const name of names.slice(0, 8)) {
+        const result = await requestPanel({ method: "POST", path: "/protected_schedule", ...u1(), query,
+          body: { name, count: -1, time: "86400", type: 1,
+            actions: [{ type: "restart", payload: "" }] } });
+        expect(result.data, `create ${name}`).toBe(true);
+      }
+      const ninth = await requestPanel({ method: "POST", path: "/protected_schedule", ...u1(), query,
+        body: { name: names[8], count: -1, time: "86400", type: 1,
+          actions: [{ type: "restart", payload: "" }] } });
+      expect(ninth.httpStatus).not.toBe(200);
+      const list = await requestPanel({ method: "GET", path: "/protected_schedule", ...u1(), query });
+      expect(list.data.map((task: any) => task.name).sort()).toEqual(names.slice(0, 8).sort());
+    } finally {
+      for (const name of names)
+        await requestPanel({ method: "DELETE", path: "/protected_schedule", ...u1(),
+          query: { ...query, task_name: name } });
+    }
   });
 
   it("low-priv instance_update by u1 (oe/ie/stopCommand/terminalOption)", async () => {

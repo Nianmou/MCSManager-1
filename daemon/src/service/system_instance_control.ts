@@ -6,6 +6,7 @@ import { sleep } from "../utils/sleep";
 import logger from "./log";
 import FileManager from "./system_file";
 import InstanceSubsystem from "./system_instance";
+import { parseRestartNotice, scheduledRestartNotice } from "./scheduled_restart_notice";
 
 export enum ScheduleActionTypeEnum {
   Delay = "delay",
@@ -13,6 +14,7 @@ export enum ScheduleActionTypeEnum {
   Stop = "stop",
   Start = "start",
   Restart = "restart",
+  RestartNotice = "restart_notice",
   Kill = "kill"
 }
 
@@ -114,6 +116,9 @@ class InstanceControlSubsystem {
     if (!FileManager.checkFileName(task.name))
       throw new Error($t("TXT_CODE_system_instance_control.illegalName"));
     if (task.actions?.length > 10) throw new Error($t("TXT_CODE_3e107108"));
+    for (const action of task.actions || []) {
+      if (action.type === ScheduleActionTypeEnum.RestartNotice) parseRestartNotice(action.payload);
+    }
     if (needStore)
       logger.info(
         $t("TXT_CODE_system_instance_control.crateTask", {
@@ -238,6 +243,10 @@ class InstanceControlSubsystem {
           }
           continue;
         }
+        if (actionType === ScheduleActionTypeEnum.RestartNotice) {
+          await scheduledRestartNotice(instance, payload);
+          continue;
+        }
         if (actionType === ScheduleActionTypeEnum.Restart) {
           if (
             instanceStatus === Instance.STATUS_RUNNING ||
@@ -262,7 +271,7 @@ class InstanceControlSubsystem {
         await sleep(100);
       }
     } catch (error: any) {
-      // ignore error
+      logger.warn(`Schedule ${task.name} on ${task.instanceUuid} failed: ${error?.message || "operation failed"}`);
     }
   }
 

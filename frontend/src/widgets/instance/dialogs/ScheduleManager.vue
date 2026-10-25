@@ -1,327 +1,565 @@
 <script setup lang="ts">
-import {
-  remoteInstancesGlobal,
-  remoteNodeList,
-  scheduleGlobal
-} from "@/services/apis";
-import { batchRestart, scheduleDelete } from "@/services/apis/instance";
+import { computed, nextTick, ref, watch } from "vue";
 import { t } from "@/lang/i18n";
+import { useAppStateStore } from "@/stores/useAppStateStore";
 import { reportErrorMsg } from "@/tools/validator";
-import type { NodeStatus, Schedule } from "@/types";
-import { INSTANCE_STATUS_CODE } from "@/types/const";
-import { ScheduleActionType, ScheduleType } from "@/types/const";
-import { DeleteOutlined, PlusOutlined, ReloadOutlined } from "@ant-design/icons-vue";
-import { message } from "ant-design-vue";
-import { computed, nextTick, ref } from "vue";
-import NewSchedule from "@/widgets/instance/dialogs/NewSchedule.vue";
+import {
+  instanceKey,
+  useScheduleInventory,
+  type ScheduleInstance,
+  type ScheduleRow
+} from "@/hooks/useScheduleInventory";
+import {
+  createOperations,
+  deleteOperations,
+  useBulkSchedules,
+  type ScheduleOperation
+} from "@/hooks/useBulkSchedules";
+import type { SchedulePayload } from "@/tools/schedule";
+import { INSTANCE_STATUS, ScheduleActionType, ScheduleType } from "@/types/const";
+import type { TableRowSelection } from "ant-design-vue/es/table/interface";
+import NewSchedule from "./NewSchedule.vue";
+import BulkScheduleComposer from "./BulkScheduleComposer.vue";
 
-interface PlanRow {
-  key: string;
-  daemonId: string;
-  nodeName: string;
-  instanceUuid: string;
-  instanceName: string;
-  nodeAvailable: boolean;
-  instanceStatus: INSTANCE_STATUS_CODE;
-  tasks: Schedule[];
-}
-
+const { isAdmin } = useAppStateStore();
+const {
+  rows,
+  nodes,
+  schedules,
+  loading,
+  excludedNodes,
+  selectedInstances,
+  selectedSchedules,
+  removedSelections,
+  load
+} = useScheduleInventory();
+const { running, results, completed, retryable, run, prepareRetry } = useBulkSchedules();
 const open = ref(false);
-const loading = ref(false);
-const rows = ref<PlanRow[]>([]);
-const selectedRowKeys = ref<string[]>([]);
-const restarting = ref(false);
-
-// Target instance for the reused NewSchedule dialog (remounted via :key on change).
-const curDaemonId = ref("");
-const curInstanceId = ref("");
-const newScheduleRef = ref<InstanceType<typeof NewSchedule>>();
-
-const instanceStatusText = (s: INSTANCE_STATUS_CODE) => {
-  switch (s) {
-    case INSTANCE_STATUS_CODE.RUNNING:
-      return "运行中";
-    case INSTANCE_STATUS_CODE.STARTING:
-      return "启动中";
-    case INSTANCE_STATUS_CODE.STOPPING:
-      return "停止中";
-    case INSTANCE_STATUS_CODE.BUSY:
-      return "忙碌";
-    default:
-      return "已停止";
-  }
-};
-
-const actionLabels = (task: Schedule) =>
-  (task.actions || [])
-    .map((a) => ScheduleActionType[a.type as keyof typeof ScheduleActionType] ?? a.type)
-    .join(" + ") || "-";
-
-const timeText = (task: Schedule) => {
-  const time = String(task.time ?? "");
-  if (task.type === 1) return `每 ${time} 秒`;
-  if (task.type === 2) {
-    const [s, m, h, , , w] = time.split(" ");
-    return `周期 周${w ?? "?"} ${h}:${m}:${s}`;
-  }
-  if (task.type === 3) {
-    const [s, m, h, dd, mm] = time.split(" ");
-    return `指定 ${mm}/${dd} ${h}:${m}:${s}`;
-  }
-  return time;
-};
-
-const columns = [
-  { title: "节点", dataIndex: "nodeName", key: "nodeName", width: 160 },
-  { title: "实例", dataIndex: "instanceName", key: "instanceName", width: 200 },
-  { title: "状态", key: "status", width: 130 },
-  { title: "计划任务", key: "tasks", minWidth: 320 },
-  { title: "操作", key: "op", width: 130 }
-];
-
-const rowSelection = computed(() => ({
-  selectedRowKeys: selectedRowKeys.value,
-  onChange: (keys: string[]) => (selectedRowKeys.value = keys)
-}));
-
-const rowClassName = (record: PlanRow) => (record.nodeAvailable ? "" : "plan-row-down");
-
-const unreachableSelectedCount = computed(
-  () => rows.value.filter((r) => selectedRowKeys.value.includes(r.key) && !r.nodeAvailable).length
+const tab = ref("instances");
+const nodeFilter = ref<string>();
+const search = ref("");
+const composer = ref<InstanceType<typeof BulkScheduleComposer>>();
+const editor = ref<InstanceType<typeof NewSchedule>>();
+const editTarget = ref<ScheduleInstance>();
+const preview = ref<ScheduleOperation[]>([]);
+const confirming = ref(false);
+const retrying = ref(false);
+const preparing = ref(false);
+const busy = computed(() => loading.value || running.value || preparing.value);
+const matches = (row: ScheduleInstance, name = "") =>
+  (!nodeFilter.value || row.daemonId === nodeFilter.value) &&
+  [row.nodeName, row.instanceName, row.instanceUuid, name]
+    .join(" ")
+    .toLowerCase()
+    .includes(search.value.toLowerCase());
+const filteredInstances = computed(() => rows.value.filter((row) => matches(row)));
+const filteredSchedules = computed(() =>
+  schedules.value.filter((row) => matches(row, row.task.name))
 );
-
-async function loadData() {
-  loading.value = true;
+const activeKeys = computed(() =>
+  tab.value === "instances" ? selectedInstances.value : selectedSchedules.value
+);
+const hiddenSelected = computed(() => {
+  const visible = new Set(
+    (tab.value === "instances" ? filteredInstances.value : filteredSchedules.value).map(
+      (row) => row.key
+    )
+  );
+  return activeKeys.value.filter((key) => !visible.has(key)).length;
+});
+const instanceSelection = computed<TableRowSelection<ScheduleInstance>>(() => ({
+  selectedRowKeys: selectedInstances.value,
+  preserveSelectedRowKeys: true,
+  onChange: (keys) => {
+    selectedInstances.value = keys as string[];
+  },
+  getCheckboxProps: () => ({ disabled: busy.value })
+}));
+const scheduleSelection = computed<TableRowSelection<ScheduleRow>>(() => ({
+  selectedRowKeys: selectedSchedules.value,
+  preserveSelectedRowKeys: true,
+  onChange: (keys) => {
+    selectedSchedules.value = keys as string[];
+  },
+  getCheckboxProps: () => ({ disabled: busy.value })
+}));
+const baseColumns = [
+  { title: t("TXT_CODE_scheduleManager.node"), dataIndex: "nodeName", key: "node", width: 150 },
+  {
+    title: t("TXT_CODE_scheduleManager.instance"),
+    dataIndex: "instanceName",
+    key: "instance",
+    width: 170
+  }
+];
+const instanceColumns = [
+  ...baseColumns,
+  { title: t("TXT_CODE_scheduleManager.status"), key: "status", width: 140 },
+  { title: t("TXT_CODE_scheduleManager.schedules"), key: "tasks" },
+  { title: t("TXT_CODE_scheduleManager.operations"), key: "operations", width: 120 }
+];
+const scheduleColumns = [
+  ...baseColumns,
+  { title: t("TXT_CODE_scheduleManager.name"), key: "name", width: 160 },
+  { title: t("TXT_CODE_scheduleManager.trigger"), key: "trigger" },
+  { title: t("TXT_CODE_scheduleManager.actions"), key: "actions" },
+  { title: t("TXT_CODE_scheduleManager.count"), key: "count", width: 100 },
+  { title: t("TXT_CODE_scheduleManager.operations"), key: "operations", width: 140 }
+];
+const operationColumns = [
+  { title: t("TXT_CODE_scheduleManager.node"), key: "node", width: 140 },
+  { title: t("TXT_CODE_scheduleManager.instance"), key: "instance", width: 160 },
+  { title: t("TXT_CODE_scheduleManager.name"), dataIndex: "name", key: "name", width: 160 },
+  { title: t("TXT_CODE_scheduleManager.result"), key: "result", width: 120 },
+  { title: t("TXT_CODE_scheduleManager.detail"), key: "detail" }
+];
+const previewInstanceCount = computed(
+  () =>
+    new Set(preview.value.map((op) => instanceKey(op.target.daemonId, op.target.instanceUuid))).size
+);
+const deleting = computed(() => preview.value[0]?.kind === "delete");
+const resultStatuses = ["success", "conflict", "skipped", "failed", "uncertain"] as const;
+const resultCounts = computed(() =>
+  Object.fromEntries(
+    resultStatuses.map((status) => [
+      status,
+      results.value.filter((op) => op.status === status).length
+    ])
+  )
+);
+const actionText = (row: ScheduleRow) =>
+  row.task.actions
+    .map(
+      (action) => ScheduleActionType[action.type as keyof typeof ScheduleActionType] || action.type
+    )
+    .join(" + ");
+const triggerText = (row: ScheduleRow) =>
+  row.task.type === 1
+    ? t("TXT_CODE_scheduleManager.interval", { seconds: row.task.time })
+    : String(ScheduleType[row.task.type as keyof typeof ScheduleType] || row.task.type) +
+      ": " +
+      row.task.time;
+function preflightDetail(op: ScheduleOperation) {
+  if (!op.target.nodeAvailable || op.target.planError)
+    return t("TXT_CODE_scheduleManager.unreadable");
+  if (op.kind === "create") {
+    if (op.target.tasks.some((task) => task.name === op.name))
+      return t("TXT_CODE_scheduleManager.nameConflict");
+    const preceding = preview.value
+      .slice(0, preview.value.indexOf(op))
+      .filter(
+        (other) =>
+          instanceKey(other.target.daemonId, other.target.instanceUuid) ===
+            instanceKey(op.target.daemonId, op.target.instanceUuid) &&
+          !op.target.tasks.some((task) => task.name === other.name)
+      ).length;
+    if (op.target.tasks.length + preceding >= 8) return t("TXT_CODE_scheduleManager.capacity");
+  }
+  if (op.kind === "delete" && !op.target.tasks.some((task) => task.name === op.name))
+    return t("TXT_CODE_scheduleManager.absent");
+  return t("TXT_CODE_scheduleManager.ready");
+}
+async function refresh() {
+  if (!isAdmin.value) return false;
   try {
-    const { execute: getNodes, state: nodeList } = remoteNodeList();
-    const { execute: getInstances, state: globalInstances } = remoteInstancesGlobal();
-    const { execute: getPlans, state: planMap } = scheduleGlobal();
-
-    await Promise.all([
-      getNodes(),
-      getInstances({ params: { page: 1, page_size: 50 } }),
-      getPlans()
-    ]);
-
-    const nodes: NodeStatus[] = nodeList.value || [];
-    const nodeNameOf = (uuid: string) => {
-      const n = nodes.find((x) => x.uuid === uuid);
-      return n?.remarks || n?.ip || uuid.slice(0, 8);
-    };
-
-    // Group all scheduled tasks by instanceUuid.
-    const tasksByInstance = new Map<string, Schedule[]>();
-    const availableByNode = new Map<string, boolean>();
-    for (const [daemonId, entry] of Object.entries(planMap.value || {})) {
-      availableByNode.set(daemonId, entry.available);
-      for (const task of entry.tasks || []) {
-        const arr = tasksByInstance.get(task.instanceUuid) || [];
-        arr.push(task);
-        tasksByInstance.set(task.instanceUuid, arr);
-      }
-    }
-
-    const built: PlanRow[] = [];
-    for (const [daemonId, entry] of Object.entries(globalInstances.value || {})) {
-      const nodeAvailable = availableByNode.get(daemonId) ?? !entry.error;
-      for (const inst of entry.instances || []) {
-        built.push({
-          key: `${daemonId}:${inst.instanceUuid}`,
-          daemonId,
-          nodeName: nodeNameOf(daemonId),
-          instanceUuid: inst.instanceUuid,
-          instanceName: inst.config?.nickname || inst.instanceUuid,
-          nodeAvailable,
-          instanceStatus: inst.status,
-          tasks: tasksByInstance.get(inst.instanceUuid) || []
-        });
-      }
-    }
-
-    rows.value = built;
-    // Auto-preselect instances on unreachable nodes ("挂了"), per the chosen down-definition.
-    selectedRowKeys.value = built.filter((r) => !r.nodeAvailable).map((r) => r.key);
-  } catch (err: any) {
-    reportErrorMsg(err?.message ?? String(err));
-  } finally {
-    loading.value = false;
+    await load();
+    return true;
+  } catch (error: any) {
+    reportErrorMsg(error.message);
+    return false;
   }
 }
-
-function openDialog() {
+async function openDialog() {
+  if (!isAdmin.value || running.value) return;
+  selectedInstances.value = [];
+  selectedSchedules.value = [];
+  results.value = [];
+  search.value = "";
+  nodeFilter.value = undefined;
+  tab.value = "instances";
   open.value = true;
-  loadData();
+  await refresh();
 }
-
-async function openCreate(row: PlanRow) {
-  curDaemonId.value = row.daemonId;
-  curInstanceId.value = row.instanceUuid;
-  open.value = true;
-  await nextTick();
-  newScheduleRef.value?.openDialog();
+function selectFiltered() {
+  if (tab.value === "instances")
+    selectedInstances.value = [
+      ...new Set([...selectedInstances.value, ...filteredInstances.value.map((r) => r.key)])
+    ];
+  else
+    selectedSchedules.value = [
+      ...new Set([...selectedSchedules.value, ...filteredSchedules.value.map((r) => r.key)])
+    ];
 }
-
-async function openEdit(row: PlanRow, task: Schedule) {
-  curDaemonId.value = row.daemonId;
-  curInstanceId.value = row.instanceUuid;
-  await nextTick();
-  newScheduleRef.value?.openDialog(task);
+function clearSelection() {
+  if (tab.value === "instances") selectedInstances.value = [];
+  else selectedSchedules.value = [];
 }
-
-async function onDeleteTask(row: PlanRow, task: Schedule) {
+async function prepareCreate(scope: "selected" | "all", drafts: SchedulePayload[]) {
+  if (busy.value || !isAdmin.value) return;
+  const selected = new Set(selectedInstances.value);
+  preparing.value = true;
   try {
-    const { execute } = scheduleDelete();
-    await execute({
-      params: { daemonId: row.daemonId, uuid: row.instanceUuid, task_name: task.name }
-    });
-    message.success(t("TXT_CODE_fbde647e"));
-    await loadData();
-  } catch (err: any) {
-    reportErrorMsg(err?.message ?? String(err));
-  }
-}
-
-async function onBatchRestart() {
-  const selected = rows.value.filter((r) => selectedRowKeys.value.includes(r.key));
-  if (selected.length === 0) return message.warning("请先勾选要重启的实例");
-  // Only instances on reachable nodes can actually be restarted.
-  const reachable = selected.filter((r) => r.nodeAvailable);
-  const skipped = selected.length - reachable.length;
-  if (reachable.length === 0) {
-    return message.warning("所选实例的节点均不可达，无法下发重启");
-  }
-  restarting.value = true;
-  try {
-    const { execute } = batchRestart();
-    await execute({
-      data: reachable.map((r) => ({ instanceUuid: r.instanceUuid, daemonId: r.daemonId }))
-    });
-    message.success(`已下发重启 ${reachable.length} 个${skipped ? `，跳过不可达 ${skipped} 个` : ""}`);
-    await loadData();
-  } catch (err: any) {
-    reportErrorMsg(err?.message ?? String(err));
+    if (!(await refresh())) return;
+    const targets =
+      scope === "all" ? rows.value : rows.value.filter((row) => selected.has(row.key));
+    if (!targets.length) return reportErrorMsg(t("TXT_CODE_scheduleManager.noTargets"));
+    preview.value = createOperations(targets, drafts);
+    retrying.value = false;
+    confirming.value = true;
   } finally {
-    restarting.value = false;
+    preparing.value = false;
   }
 }
-
+async function prepareDelete(single?: ScheduleRow) {
+  if (busy.value || !isAdmin.value) return;
+  const selected = new Set(single ? [single.key] : selectedSchedules.value);
+  preparing.value = true;
+  try {
+    if (!(await refresh())) return;
+    preview.value = deleteOperations(schedules.value.filter((row) => selected.has(row.key)));
+    if (!preview.value.length) return reportErrorMsg(t("TXT_CODE_scheduleManager.noTargets"));
+    retrying.value = false;
+    confirming.value = true;
+  } finally {
+    preparing.value = false;
+  }
+}
+async function retry() {
+  if (busy.value || !isAdmin.value) return;
+  preparing.value = true;
+  try {
+    if (!(await refresh())) return;
+    preview.value = prepareRetry(rows.value);
+    retrying.value = true;
+    confirming.value = preview.value.length > 0;
+  } finally {
+    preparing.value = false;
+  }
+}
+async function executePreview() {
+  if (running.value || !isAdmin.value || !confirming.value) return;
+  confirming.value = false;
+  composer.value?.close();
+  await run(preview.value, retrying.value);
+  await refresh();
+}
+async function openEdit(row: ScheduleRow) {
+  if (busy.value) return;
+  editTarget.value = row;
+  await nextTick();
+  editor.value?.openDialog(row.task);
+}
+watch(isAdmin, (value) => {
+  if (!value) open.value = false;
+});
 defineExpose({ openDialog });
 </script>
 
 <template>
-  <a-modal v-model:open="open" title="整体计划管理" width="1100px" :footer="null" destroy-on-close>
-    <div class="mb-12">
-      <a-alert
-        type="info"
-        show-icon
-        message="跨节点汇总每个实例的定时计划（含重启）。节点不可达的实例已自动预选并高亮——它们无法直接重启，预选是为了让你尽快为其补上/检查重启计划；重启只会下发到节点在线的实例。"
+  <a-modal
+    v-if="isAdmin"
+    v-model:open="open"
+    :title="t('TXT_CODE_scheduleManager.title')"
+    width="1200px"
+    :body-style="{ maxHeight: 'calc(100vh - 200px)', overflowY: 'auto' }"
+    :footer="null"
+    :closable="!busy"
+    :keyboard="!busy"
+    :mask-closable="!busy"
+    destroy-on-close
+  >
+    <a-alert
+      class="mb-12"
+      type="info"
+      show-icon
+      :message="t('TXT_CODE_scheduleManager.appendHint')"
+    />
+    <a-alert
+      v-if="excludedNodes.length"
+      class="mb-12"
+      type="warning"
+      show-icon
+      :message="t('TXT_CODE_scheduleManager.excludedNodes', { nodes: excludedNodes.join(', ') })"
+    />
+    <a-alert
+      v-if="removedSelections"
+      class="mb-12"
+      type="warning"
+      :message="t('TXT_CODE_scheduleManager.removedSelection', { count: removedSelections })"
+    />
+    <a-tabs v-model:active-key="tab">
+      <a-tab-pane key="instances" :tab="t('TXT_CODE_scheduleManager.instances')" />
+      <a-tab-pane key="schedules" :tab="t('TXT_CODE_scheduleManager.schedules')" />
+    </a-tabs>
+    <div class="schedule-toolbar mb-12">
+      <a-input
+        v-model:value="search"
+        allow-clear
+        :placeholder="t('TXT_CODE_scheduleManager.search')"
+        style="width: 250px"
+        :disabled="busy"
       />
-    </div>
-
-    <div class="toolbar mb-12">
-      <a-space>
-        <a-button :loading="loading" @click="loadData">
-          <ReloadOutlined />
-          刷新
-        </a-button>
-        <a-popconfirm
-          :title="`确认重启已选的 ${selectedRowKeys.length} 个实例？（节点不可达的会自动跳过）`"
-          ok-text="确认重启"
-          cancel-text="取消"
-          @confirm="onBatchRestart"
+      <a-select
+        v-model:value="nodeFilter"
+        allow-clear
+        :placeholder="t('TXT_CODE_scheduleManager.allNodes')"
+        style="width: 190px"
+        :disabled="busy"
+        :options="
+          nodes.map((node) => ({ value: node.uuid, label: node.remarks || node.ip || node.uuid }))
+        "
+      />
+      <a-button :loading="loading" :disabled="busy" @click="refresh">
+        {{ t("TXT_CODE_scheduleManager.refresh") }}
+      </a-button>
+      <template v-if="tab === 'instances'">
+        <a-button
+          type="primary"
+          data-testid="batch-add"
+          :disabled="busy || !selectedInstances.length"
+          @click="composer?.openDialog('selected')"
         >
-          <a-button type="primary" danger :loading="restarting" :disabled="selectedRowKeys.length === 0">
-            批量重启已选（{{ selectedRowKeys.length }}）
-          </a-button>
-        </a-popconfirm>
-        <span v-if="unreachableSelectedCount" class="warn-text">
-          其中 {{ unreachableSelectedCount }} 个节点不可达，将被跳过
-        </span>
-      </a-space>
+          {{ t("TXT_CODE_scheduleManager.batchAdd") }}
+        </a-button>
+        <a-button
+          data-testid="apply-all"
+          :disabled="busy || !rows.length"
+          @click="composer?.openDialog('all')"
+        >
+          {{ t("TXT_CODE_scheduleManager.applyAll") }}
+        </a-button>
+      </template>
+      <a-button
+        v-else
+        danger
+        data-testid="batch-delete"
+        :disabled="busy || !selectedSchedules.length"
+        @click="prepareDelete()"
+      >
+        {{ t("TXT_CODE_scheduleManager.batchDelete", { count: selectedSchedules.length }) }}
+      </a-button>
     </div>
-
-    <a-spin :spinning="loading">
+    <a-space class="mb-12" wrap>
+      <span>{{
+        t("TXT_CODE_scheduleManager.selection", {
+          count: activeKeys.length,
+          hidden: hiddenSelected
+        })
+      }}</span>
+      <a-button type="link" :disabled="busy" @click="selectFiltered">
+        {{ t("TXT_CODE_scheduleManager.selectFiltered") }}
+      </a-button>
+      <a-button type="link" :disabled="busy || !activeKeys.length" @click="clearSelection">
+        {{ t("TXT_CODE_scheduleManager.clearSelection") }}
+      </a-button>
+    </a-space>
+    <a-table
+      v-if="tab === 'instances'"
+      :data-source="filteredInstances"
+      :columns="instanceColumns"
+      row-key="key"
+      :row-selection="instanceSelection"
+      :loading="loading"
+      :pagination="{ pageSize: 15 }"
+      :scroll="{ x: 900 }"
+      size="middle"
+    >
+      <template #bodyCell="{ column, record }">
+        <template v-if="column.key === 'status'">
+          <a-tag v-if="!record.nodeAvailable" color="error">
+            {{ t("TXT_CODE_scheduleManager.offline") }}
+          </a-tag>
+          <a-tag v-else>
+            {{ INSTANCE_STATUS[record.instanceStatus as keyof typeof INSTANCE_STATUS] }}
+          </a-tag>
+          <a-tag v-if="record.planError" color="warning">
+            {{ t("TXT_CODE_scheduleManager.unreadable") }}
+          </a-tag>
+        </template>
+        <template v-else-if="column.key === 'tasks'">
+          <span v-if="!record.tasks.length">{{
+            record.planError
+              ? t("TXT_CODE_scheduleManager.unreadable")
+              : t("TXT_CODE_scheduleManager.empty")
+          }}</span>
+          <a-tag v-for="task in record.tasks" :key="task.name">{{ task.name }}</a-tag>
+          <span v-if="!record.planError">{{ record.tasks.length }} / 8</span>
+        </template>
+        <a-button
+          v-else-if="column.key === 'operations'"
+          size="small"
+          :disabled="busy || record.planError"
+          @click="
+            selectedInstances = [record.key];
+            composer?.openDialog('selected');
+          "
+        >
+          {{ t("TXT_CODE_scheduleManager.add") }}
+        </a-button>
+      </template>
+    </a-table>
+    <a-table
+      v-else
+      :data-source="filteredSchedules"
+      :columns="scheduleColumns"
+      row-key="key"
+      :row-selection="scheduleSelection"
+      :loading="loading"
+      :pagination="{ pageSize: 15 }"
+      :scroll="{ x: 1100 }"
+      size="middle"
+    >
+      <template #bodyCell="{ column, record }">
+        <template v-if="column.key === 'name'">{{ record.task.name }}</template>
+        <template v-else-if="column.key === 'trigger'">
+          {{ triggerText(record as ScheduleRow) }}
+        </template>
+        <template v-else-if="column.key === 'actions'">
+          {{ actionText(record as ScheduleRow) }}
+        </template>
+        <template v-else-if="column.key === 'count'">
+          {{
+            Number(record.task.count) > 0
+              ? record.task.count
+              : t("TXT_CODE_scheduleManager.unlimited")
+          }}
+        </template>
+        <a-space v-else-if="column.key === 'operations'">
+          <a-button
+            size="small"
+            type="link"
+            :disabled="busy || record.planError"
+            @click="openEdit(record as ScheduleRow)"
+          >
+            {{ t("TXT_CODE_scheduleManager.edit") }}
+          </a-button>
+          <a-button
+            size="small"
+            type="link"
+            danger
+            :disabled="busy || record.planError"
+            @click="prepareDelete(record as ScheduleRow)"
+          >
+            {{ t("TXT_CODE_scheduleManager.delete") }}
+          </a-button>
+        </a-space>
+      </template>
+    </a-table>
+    <a-divider v-if="results.length" />
+    <template v-if="results.length">
+      <div class="schedule-toolbar">
+        <strong>{{
+          t("TXT_CODE_scheduleManager.progress", { done: completed, total: results.length })
+        }}</strong>
+        <a-tag v-for="status in resultStatuses" :key="status">
+          {{ t("TXT_CODE_scheduleManager." + status) }}: {{ resultCounts[status] }}
+        </a-tag>
+        <a-button :disabled="busy || !retryable.length" :loading="preparing" @click="retry">
+          {{ t("TXT_CODE_scheduleManager.retry") }}
+        </a-button>
+      </div>
+      <a-progress
+        :percent="results.length ? Math.round((completed * 100) / results.length) : 0"
+        :status="running ? 'active' : 'normal'"
+      />
       <a-table
-        :data-source="rows"
-        :columns="columns"
-        :row-key="(r: PlanRow) => r.key"
-        :row-selection="rowSelection"
-        :row-class-name="rowClassName"
-        :scroll="{ x: 'max-content' }"
-        :pagination="{ pageSize: 15 }"
-        size="middle"
+        :data-source="results"
+        :columns="operationColumns"
+        row-key="key"
+        :pagination="{ pageSize: 10 }"
+        :scroll="{ x: 850 }"
+        size="small"
       >
         <template #bodyCell="{ column, record }">
-          <template v-if="column.key === 'status'">
-            <a-tag v-if="!record.nodeAvailable" color="error">节点不可达</a-tag>
-            <a-tag v-else-if="record.instanceStatus === INSTANCE_STATUS_CODE.RUNNING" color="success">
-              {{ instanceStatusText(record.instanceStatus) }}
-            </a-tag>
-            <a-tag v-else color="default">{{ instanceStatusText(record.instanceStatus) }}</a-tag>
+          <template v-if="column.key === 'node'">{{ record.target.nodeName }}</template>
+          <template v-else-if="column.key === 'instance'">
+            {{ record.target.instanceName }}
           </template>
-
-          <template v-else-if="column.key === 'tasks'">
-            <span v-if="!record.tasks.length" class="muted">无计划</span>
-            <div v-for="task in record.tasks" :key="task.name" class="task-line">
-              <a-tag color="blue">{{ task.name }}</a-tag>
-              <span class="task-detail">
-                {{ actionLabels(task) }} · {{ timeText(task) }} ·
-                {{ ScheduleType[task.type as keyof typeof ScheduleType] ?? task.type }} ·
-                剩余 {{ Number(task.count) > 0 ? task.count : "无限" }}
-              </span>
-              <a-button size="small" type="link" @click="openEdit(record, task)">编辑</a-button>
-              <a-popconfirm title="确认删除该计划？" ok-text="删除" cancel-text="取消" @confirm="onDeleteTask(record, task)">
-                <a-button size="small" type="link" danger>
-                  <DeleteOutlined />
-                </a-button>
-              </a-popconfirm>
-            </div>
+          <template v-else-if="column.key === 'result'">
+            {{ t("TXT_CODE_scheduleManager." + record.status) }}
           </template>
-
-          <template v-else-if="column.key === 'op'">
-            <a-button size="small" @click="openCreate(record)">
-              <PlusOutlined />
-              新建计划
-            </a-button>
-          </template>
+          <template v-else-if="column.key === 'detail'">{{ record.detail }}</template>
         </template>
       </a-table>
-    </a-spin>
+    </template>
   </a-modal>
 
+  <BulkScheduleComposer
+    v-if="isAdmin"
+    ref="composer"
+    :selected-count="selectedInstances.length"
+    :all-count="rows.length"
+    :loading="preparing"
+    @prepare="prepareCreate"
+  />
+  <a-modal
+    v-if="isAdmin"
+    v-model:open="confirming"
+    :title="
+      t(deleting ? 'TXT_CODE_scheduleManager.confirmDelete' : 'TXT_CODE_scheduleManager.preview')
+    "
+    width="900px"
+    :body-style="{ maxHeight: 'calc(100vh - 240px)', overflowY: 'auto' }"
+    :mask-closable="false"
+    :ok-button-props="{ danger: deleting }"
+    :ok-text="
+      deleting
+        ? t('TXT_CODE_scheduleManager.batchDelete', { count: preview.length })
+        : t('TXT_CODE_scheduleManager.apply')
+    "
+    @ok="executePreview"
+  >
+    <a-alert
+      class="mb-12"
+      :type="deleting ? 'warning' : 'info'"
+      show-icon
+      :message="
+        t(
+          deleting
+            ? 'TXT_CODE_scheduleManager.deleteSummary'
+            : 'TXT_CODE_scheduleManager.createSummary',
+          { count: preview.length, instances: previewInstanceCount }
+        )
+      "
+    />
+    <a-alert
+      v-if="excludedNodes.length"
+      class="mb-12"
+      type="warning"
+      :message="t('TXT_CODE_scheduleManager.excludedNodes', { nodes: excludedNodes.join(', ') })"
+    />
+    <a-table
+      :data-source="preview"
+      :columns="operationColumns.filter((column) => column.key !== 'result')"
+      row-key="key"
+      :pagination="{ pageSize: 10 }"
+      :scroll="{ x: 750 }"
+      size="small"
+    >
+      <template #bodyCell="{ column, record }">
+        <template v-if="column.key === 'node'">{{ record.target.nodeName }}</template>
+        <template v-else-if="column.key === 'instance'">{{ record.target.instanceName }}</template>
+        <template v-else-if="column.key === 'detail'">
+          {{ preflightDetail(record as ScheduleOperation) }}
+        </template>
+      </template>
+    </a-table>
+  </a-modal>
   <NewSchedule
-    :key="`${curDaemonId}:${curInstanceId}`"
-    ref="newScheduleRef"
-    :daemon-id="curDaemonId"
-    :instance-id="curInstanceId"
-    @get-schedule-list="loadData"
+    v-if="isAdmin && editTarget"
+    :key="instanceKey(editTarget.daemonId, editTarget.instanceUuid)"
+    ref="editor"
+    :daemon-id="editTarget.daemonId"
+    :instance-id="editTarget.instanceUuid"
+    @get-schedule-list="refresh"
   />
 </template>
 
-<style lang="scss" scoped>
-.toolbar {
+<style scoped>
+.schedule-toolbar {
   display: flex;
-  align-items: center;
-}
-.warn-text {
-  color: #d4380d;
-  font-size: 13px;
-}
-.muted {
-  color: #999;
-}
-.task-line {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 0;
   flex-wrap: wrap;
-}
-.task-detail {
-  font-size: 13px;
-  color: #555;
-}
-:deep(.plan-row-down) {
-  background: #fff1f0;
+  align-items: center;
+  gap: 8px;
 }
 </style>

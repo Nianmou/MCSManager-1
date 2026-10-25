@@ -38,6 +38,7 @@ export const GLOBAL_INSTANCE_KEY = "__MCSM_GLOBAL_INSTANCE__";
 export const GLOBAL_INSTANCE_UUID_KEY = "global0001";
 
 interface IInstanceInfo {
+  cs2?: import("../../service/cs2_runtime").Cs2Runtime;
   mcPingOnline: boolean;
   currentPlayers: number;
   maxPlayers: number;

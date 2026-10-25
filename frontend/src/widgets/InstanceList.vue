@@ -20,7 +20,9 @@ import {
   UploadOutlined,
   WarningOutlined
 } from "@ant-design/icons-vue";
-import { computed, h, onMounted, onUnmounted, ref } from "vue";
+import { computed, h, onMounted, onUnmounted, ref, watch } from "vue";
+import { useWorkshopDownload } from "@/hooks/useWorkshopDownload";
+import { WORKSHOP_DOWNLOAD_COMMAND } from "@/services/apis/workshop";
 
 import BetweenMenus from "@/components/BetweenMenus.vue";
 import { router } from "@/config/router";
@@ -53,6 +55,10 @@ import type { InstanceDetail, NodeStatus } from "../types/index";
 import InstanceLine from "./instance/InstanceLine.vue";
 import Shortcut from "./instance/Shortcut.vue";
 import ScheduleManager from "./instance/dialogs/ScheduleManager.vue";
+import RestartNoticeDialog from "./instance/dialogs/RestartNoticeDialog.vue";
+import DeploymentDialog from "./instance/deployment/DeploymentDialog.vue";
+import type { DeploymentMode } from "./instance/deployment/package";
+import { useAppStateStore } from "@/stores/useAppStateStore";
 
 defineProps<{
   card: LayoutCard;
@@ -70,6 +76,23 @@ const currentRemoteNode = ref<NodeStatus>();
 const isGlobalDaemonMode = computed(() => currentRemoteNode.value?.uuid === ALL_DAEMON_MODE);
 
 const scheduleManagerDialog = ref<InstanceType<typeof ScheduleManager>>();
+const restartNoticeDialog = ref<InstanceType<typeof RestartNoticeDialog>>();
+function openRestartNotice(requireSelection = false) {
+  if (requireSelection && !selectedInstance.value.length) return reportErrorMsg(t("TXT_CODE_restartNotice.selectFirst"));
+  restartNoticeDialog.value?.openDialog(selectedInstance.value.map((instance) => ({
+    daemonId: instance.daemonId || currentRemoteNode.value?.uuid || "",
+    instanceUuid: instance.instanceUuid,
+    name: instance.config.nickname
+  })));
+}
+const deploymentDialog = ref<InstanceType<typeof DeploymentDialog>>();
+function openDeployment(mode: DeploymentMode) {
+  deploymentDialog.value?.openDialog(mode, selectedInstance.value.map((instance) => ({
+    daemonId: instance.daemonId || currentRemoteNode.value?.uuid || "",
+    instanceUuid: instance.instanceUuid
+  })));
+}
+const { isAdmin } = useAppStateStore();
 
 const { execute: getNodes, state: nodes, isLoading: loadingNodes } = remoteNodeList();
 const { execute: getInstances, state: instances, isLoading: loadingInstance } = remoteInstances();
@@ -350,7 +373,7 @@ type BatchSelectedInstance = InstanceMoreDetail & {
   daemonId?: string;
 };
 
-type BatchTaskStatus = "pending" | "running" | "success" | "failed" | "skipped";
+type BatchTaskStatus = "pending" | "running" | "success" | "failed" | "skipped" | "accepted" | "uncertain";
 
 interface BatchTaskRow {
   key: string;
@@ -412,6 +435,8 @@ const batchTaskColumns = [
 ];
 
 const batchStatusText: Record<BatchTaskStatus, string> = {
+  accepted: t("TXT_CODE_workshop.acceptedStatus"),
+  uncertain: t("TXT_CODE_workshop.uncertainStatus"),
   pending: "等待",
   running: "执行中",
   success: "成功",
@@ -420,6 +445,8 @@ const batchStatusText: Record<BatchTaskStatus, string> = {
 };
 
 const batchStatusColor: Record<BatchTaskStatus, string> = {
+  accepted: "success",
+  uncertain: "warning",
   pending: "default",
   running: "processing",
   success: "success",
@@ -487,10 +514,10 @@ const batchNodeProgress = computed(() => {
       if (batchProgressByNode.value && rows.every((row) => row.status === "skipped")) continue;
       total += 1;
       if (rows.some((row) => row.status === "running")) running += 1;
-      else if (rows.some((row) => row.status === "failed")) {
+      else if (rows.some((row) => row.status === "failed" || row.status === "uncertain")) {
         failed += 1;
         finished += 1;
-      } else if (rows.some((row) => row.status === "success")) finished += 1;
+      } else if (rows.some((row) => row.status === "success" || row.status === "accepted")) finished += 1;
       else if (rows.some((row) => row.status === "pending")) waiting += 1;
       else if (rows.every((row) => row.status === "skipped")) finished += 1;
     }
@@ -661,6 +688,8 @@ const instanceTableColumns: AntColumnsType[] = [
     width: 100,
     align: "center"
   },
+  { title: t("TXT_CODE_7e9727bd"), dataIndex: "players", key: "players", width: 100, align: "left" },
+  { title: t("TXT_CODE_cs2.versions"), key: "versions", width: 220, align: "left" },
   {
     title: t("TXT_CODE_67d68dd1"),
     dataIndex: "type",
@@ -676,13 +705,6 @@ const instanceTableColumns: AntColumnsType[] = [
     align: "center"
   },
   { title: t("TXT_CODE_b283e720"), dataIndex: "resources", key: "resources", align: "left" },
-  {
-    title: t("TXT_CODE_7e9727bd"),
-    dataIndex: "players",
-    key: "players",
-    width: 100,
-    align: "left"
-  },
   {
     title: t("TXT_CODE_fe731dfc"),
     dataIndex: "actions",
@@ -741,6 +763,38 @@ const exitMultipleMode = () => {
   selectedInstance.value = [];
 };
 
+const workshop = useWorkshopDownload();
+const isWorkshopConsole = computed(() => batchConsoleRows.value.some((row) => row.action === WORKSHOP_DOWNLOAD_COMMAND));
+watch(workshop.rows, (rows) => {
+  batchConsoleRows.value = rows.map((row) => ({ ...row, name: row.name || row.instanceUuid,
+    nodeName: resolveNodeName(row.daemonId), action: WORKSHOP_DOWNLOAD_COMMAND,
+    status: row.state, detail: t(`TXT_CODE_workshop.${row.reason}`) }));
+}, { deep: true });
+async function openWorkshopDownload() {
+  if (!isAdmin.value || batchRunning.value || workshop.running.value) return;
+  const targets = selectedInstance.value.map((item) => {
+    const daemonId = item.daemonId || currentRemoteNode.value?.uuid || "";
+    return { daemonId, instanceUuid: item.instanceUuid, name: item.config?.nickname,
+      offline: nodeNameById.value[daemonId]?.available === false };
+  });
+  if (!targets.length) return reportErrorMsg(t("TXT_CODE_a0a77be5"));
+  if (new Set(targets.map((item) => `${item.daemonId}:${item.instanceUuid}`)).size > 200)
+    return reportErrorMsg(t("TXT_CODE_workshop.limit"));
+  try {
+    await workshop.run(targets, (count) => new Promise<boolean>((resolve) => {
+      Modal.confirm({ title: t("TXT_CODE_workshop.title"),
+        content: t("TXT_CODE_workshop.confirm", { count, command: WORKSHOP_DOWNLOAD_COMMAND }),
+        okText: t("TXT_CODE_workshop.title"), cancelText: t("TXT_CODE_workshop.cancel"),
+        onOk: () => { resolve(true); }, onCancel: () => { resolve(false); } });
+    }), () => {
+      batchConsoleTitle.value = t("TXT_CODE_workshop.title");
+      batchProgressByNode.value = false;
+      batchConsoleVisible.value = true;
+      startBatchTicker();
+    });
+  } finally { if (isWorkshopConsole.value) stopBatchTicker(); }
+}
+
 const instanceOperations = [
   {
     title: t("TXT_CODE_57245e94"),
@@ -756,6 +810,18 @@ const instanceOperations = [
     title: t("TXT_CODE_47dcfa5"),
     icon: RedoOutlined,
     click: () => batchOperation("restart")
+  },
+  {
+    title: t("TXT_CODE_restartNotice.action"),
+    adminOnly: true,
+    icon: FieldTimeOutlined,
+    click: () => openRestartNotice(true)
+  },
+  {
+    title: t("TXT_CODE_workshop.title"),
+    adminOnly: true,
+    icon: CloudDownloadOutlined,
+    click: openWorkshopDownload
   },
   {
     title: "一键更新",
@@ -787,8 +853,9 @@ const instanceOperations = [
 ];
 
 const visibleInstanceOperations = computed(() => {
-  if (!isGlobalDaemonMode.value) return instanceOperations;
-  return instanceOperations.filter(
+  const permitted = instanceOperations.filter((item) => isAdmin.value || !item.adminOnly);
+  if (!isGlobalDaemonMode.value) return permitted;
+  return permitted.filter(
     (item) => item.icon !== DeleteOutlined && item.icon !== WarningOutlined
   );
 });
@@ -1422,9 +1489,18 @@ onMounted(async () => {
                 <DownOutlined />
               </a-button>
             </a-dropdown>
-            <a-button @click="scheduleManagerDialog?.openDialog()">
+            <a-button v-if="isAdmin" @click="scheduleManagerDialog?.openDialog()">
               <FieldTimeOutlined />
-              计划管理
+              {{ t("TXT_CODE_scheduleManager.title") }}
+            </a-button>
+            <a-button v-if="isAdmin" @click="openRestartNotice()">
+              <FieldTimeOutlined /> {{ t("TXT_CODE_restartNotice.title") }}
+            </a-button>
+            <a-button v-if="isAdmin" @click="openDeployment('platform')">
+              <CloudDownloadOutlined /> {{ t("TXT_CODE_deploy.platform") }}
+            </a-button>
+            <a-button v-if="isAdmin" @click="openDeployment('plugin')">
+              <UploadOutlined /> {{ t("TXT_CODE_deploy.plugin") }}
             </a-button>
             <a-button
               type="primary"
@@ -1477,10 +1553,10 @@ onMounted(async () => {
                 v-if="
                   (isGlobalDaemonMode
                     ? tableTreeData.reduce(
-                        (total, node) =>
-                          total + (node.children || []).filter((child: any) => child.inst).length,
-                        0
-                      )
+                      (total, node) =>
+                        total + (node.children || []).filter((child: any) => child.inst).length,
+                      0
+                    )
                     : instancesMoreInfo.length) === selectedInstance.length
                 "
                 class="mr-10"
@@ -1497,6 +1573,7 @@ onMounted(async () => {
                     <a-menu-item
                       v-for="item in visibleInstanceOperations"
                       :key="item.title"
+                      :disabled="batchRunning || workshop.running.value"
                       @click="item.click"
                     >
                       <component :is="item.icon" />
@@ -1663,6 +1740,11 @@ onMounted(async () => {
       placement="right"
     >
       <a-alert
+        v-if="isWorkshopConsole" class="mb-20" type="info" show-icon
+        :message="t('TXT_CODE_workshop.hint')"
+      />
+      <a-alert
+        v-else
         class="mb-20"
         type="info"
         show-icon
@@ -1722,12 +1804,12 @@ onMounted(async () => {
       :cancel-text="t('TXT_CODE_518528d0')"
       @ok="runBatchUpload"
     >
-        <a-alert
-          class="mb-20"
-          type="info"
-          show-icon
-          message="本次会直接上传到每个选中服务器的真实文件系统；目标目录必须是 /mnt/steam/cs2 下的绝对路径。"
-        />
+      <a-alert
+        class="mb-20"
+        type="info"
+        show-icon
+        message="本次会直接上传到每个选中服务器的真实文件系统；目标目录必须是 /mnt/steam/cs2 下的绝对路径。"
+      />
       <a-form layout="vertical">
         <a-form-item label="目标目录">
           <a-space direction="vertical" style="width: 100%" :size="8">
@@ -1831,6 +1913,8 @@ onMounted(async () => {
     </a-modal>
 
     <ScheduleManager ref="scheduleManagerDialog" />
+    <RestartNoticeDialog v-if="isAdmin" ref="restartNoticeDialog" />
+    <DeploymentDialog v-if="isAdmin" ref="deploymentDialog" />
   </div>
 </template>
 

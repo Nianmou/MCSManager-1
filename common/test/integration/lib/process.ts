@@ -9,6 +9,7 @@ export function spawnApp(opts: { app: string; args?: string[]; cwd: string; logF
     cwd: opts.cwd,
     env: { ...process.env },
     stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
     detached: true
   });
   const stream = fs.createWriteStream(opts.logFile);
